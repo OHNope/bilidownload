@@ -11,6 +11,7 @@
 // @connect      api.bilibili.com
 // @connect      *.bilivideo.com
 // @connect      upos-hz-mirrorakam.akamaized.net
+// @connect      upos-sz-mirrorcos.bilivideo.com
 // @grant unsafeWindow
 // ==/UserScript==
 
@@ -175,6 +176,45 @@ interface CustomWindow extends Window {
   removeBiliSelections?: (mediaId: string, bvIdsToRemove: string[]) => void;
   unsafeWindow?: CustomWindow;
   URL: typeof URL;
+}
+interface GmFetchOptions {
+  method?: "GET" | "POST" | "HEAD";
+  url: string;
+  headers?: Record<string, string>;
+  responseType?: "text" | "json" | "blob" | "arraybuffer";
+  onprogress?: (event: any) => void;
+  // ... other GM_xhr options
+}
+
+async function gmFetch<T>(options: GmFetchOptions): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    GM_xmlhttpRequest({
+      ...options,
+      // default headers/method can be set here
+      onload: (response: any) => {
+        // Centralised status check
+        if (response.status >= 200 && response.status < 300) {
+          // response.response automatically handles json/blob/text
+          resolve(response.response as T);
+        } else {
+          // Standardised error
+          reject(
+            new Error(
+              `[GM_API] HTTP Error ${response.status}: ${response.statusText} for ${options.url}`,
+            ),
+          );
+        }
+      },
+      onerror: (error: any) =>
+        reject(
+          new Error(
+            `[GM_API] Network Error: ${JSON.stringify(error)} for ${options.url}`,
+          ),
+        ),
+      ontimeout: () => reject(new Error(`[GM_API] Timeout for ${options.url}`)),
+      onprogress: options.onprogress, // Pass through
+    });
+  });
 }
 
 declare const unsafeWindow: CustomWindow;
@@ -1129,33 +1169,15 @@ function TaskSelectScript(window: CustomWindow): void {
         try {
           // --- Step A: Get video URL using GM_xmlhttpRequest ---
           console.log(`[GM] 获取 ${task.name} 的视频信息...`);
-          const videoInfoText = await new Promise<string>((resolve, reject) => {
-            GM_xmlhttpRequest({
-              method: "GET",
-              url: `https://api.bilibili.com/x/player/playurl?bvid=${task.bv}&cid=${task.id}&qn=116&type=&otype=json&platform=html5&high_quality=1`,
-              headers: {
-                Referer: `https://www.bilibili.com/video/${task.bv}`,
-                "User-Agent": navigator.userAgent,
-              },
-              responseType: "text",
-              onload: (response: any) => {
-                if (response.status >= 200 && response.status < 300) {
-                  resolve(response.responseText);
-                } else {
-                  reject(
-                    new Error(
-                      `[GM] API HTTP error! Status: ${response.status}, Response: ${response.responseText}`,
-                    ),
-                  );
-                }
-              },
-              onerror: (error: any) =>
-                reject(
-                  new Error(
-                    `[GM] API request failed: ${JSON.stringify(error)}`,
-                  ),
-                ),
-            });
+
+          const videoInfoText = await gmFetch<string>({
+            method: "GET",
+            url: `https://api.bilibili.com/x/player/playurl?bvid=${task.bv}&cid=${task.id}&qn=116&type=&otype=json&platform=html5&high_quality=1`,
+            headers: {
+              Referer: `https://www.bilibili.com/video/${task.bv}`,
+              "User-Agent": navigator.userAgent,
+            },
+            responseType: "text",
           });
 
           const jsonResponse = JSON.parse(videoInfoText);
@@ -1170,43 +1192,22 @@ function TaskSelectScript(window: CustomWindow): void {
 
           // --- Step B: Download video Blob using GM_xmlhttpRequest ---
           console.log(`  [GM] 开始下载 ${task.name} 的视频内容...`);
-          const videoBlob = await new Promise<Blob>((resolve, reject) => {
-            GM_xmlhttpRequest({
-              method: "GET",
-              url: videoUrl,
-              responseType: "blob",
-              headers: {
-                Referer: "https://www.bilibili.com/",
-              },
-              onprogress: (progressEvent: any) => {
-                if (progressEvent.lengthComputable && progressWindows[wid]) {
-                  const percent = Math.round(
-                    (progressEvent.loaded / progressEvent.total) * 100,
-                  );
-                  progressWindows[wid].updateProgress(String(task.id), percent);
-                }
-              },
-              onload: (response: any) => {
-                if (response.status === 200) {
-                  if (progressWindows[wid]) {
-                    progressWindows[wid].updateProgress(String(task.id), 100);
-                  }
-                  resolve(response.response);
-                } else {
-                  reject(
-                    new Error(
-                      `[GM] 下载 ${task.name} 视频失败，状态码: ${response.status}`,
-                    ),
-                  );
-                }
-              },
-              onerror: (error: any) =>
-                reject(
-                  new Error(
-                    `[GM] Video download failed: ${JSON.stringify(error)}`,
-                  ),
-                ),
-            });
+
+          const videoBlob = await gmFetch<Blob>({
+            method: "GET",
+            url: videoUrl,
+            responseType: "blob",
+            headers: {
+              Referer: "https://www.bilibili.com/",
+            },
+            onprogress: (progressEvent: any) => {
+              if (progressEvent.lengthComputable && progressWindows[wid]) {
+                const percent = Math.round(
+                  (progressEvent.loaded / progressEvent.total) * 100,
+                );
+                progressWindows[wid].updateProgress(String(task.id), percent);
+              }
+            },
           });
 
           console.log(
@@ -3214,30 +3215,14 @@ async function addSingleVideo(
   const LOG_PREFIX_ASV = "[AddSingleVideo]";
   try {
     // Step 1: Get video title and page list using GM_xmlhttpRequest
-    const viewDataText = await new Promise<string>((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: "GET",
-        url: `https://api.bilibili.com/x/web-interface/view?bvid=${bvId}`,
-        responseType: "text",
-        headers: {
-          Referer: "https://www.bilibili.com/", // Adding a referer is good practice
-        },
-        onload: (response: any) => {
-          if (response.status >= 200 && response.status < 300) {
-            resolve(response.responseText);
-          } else {
-            reject(
-              new Error(
-                `[GM] View API HTTP error! Status: ${response.status} for BV ${bvId}`,
-              ),
-            );
-          }
-        },
-        onerror: (error: any) =>
-          reject(
-            new Error(`[GM] View API request failed: ${JSON.stringify(error)}`),
-          ),
-      });
+
+    const viewDataText = await gmFetch<string>({
+      method: "GET",
+      url: `https://api.bilibili.com/x/web-interface/view?bvid=${bvId}`,
+      responseType: "text",
+      headers: {
+        Referer: "https://www.bilibili.com/", // Adding a referer is good practice
+      },
     });
 
     const viewData = JSON.parse(viewDataText);
@@ -3315,32 +3300,14 @@ async function addSingleVideo(
 
     try {
       // Use GM_xmlhttpRequest to fetch the folder list
-      const json = await new Promise<any>((resolve, reject) => {
-        GM_xmlhttpRequest({
-          method: "GET",
-          url: `https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${upMid}`,
-          responseType: "json", // Let GM handle JSON parsing
-          headers: {
-            Referer: `https://space.bilibili.com/${upMid}/favlist`,
-          },
-          onload: (response: any) => {
-            if (response.status >= 200 && response.status < 300) {
-              resolve(response.response); // The 'response' property holds the parsed JSON
-            } else {
-              reject(
-                new Error(
-                  `[GM] Folder API HTTP error! Status: ${response.status}`,
-                ),
-              );
-            }
-          },
-          onerror: (error: any) =>
-            reject(
-              new Error(
-                `[GM] Folder API request failed: ${JSON.stringify(error)}`,
-              ),
-            ),
-        });
+
+      const json = await gmFetch<any>({
+        method: "GET",
+        url: `https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${upMid}`,
+        responseType: "json", // Let GM handle JSON parsing
+        headers: {
+          Referer: `https://space.bilibili.com/${upMid}/favlist`,
+        },
       });
 
       if (json && json.data && json.data.list) {

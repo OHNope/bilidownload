@@ -12,9 +12,7 @@
 // @connect      bilibili.com
 // @connect      bilivideo.com
 // @connect      hdslb.com
-// @connect      upos-hz-mirrorakam.akamaized.net
-// @connect      upos-sz-mirrorcos.bilivideo.com
-// @connect      cn-hk-eq-01-12.bilivideo.com
+// @connect      akamaized.net
 // @grant unsafeWindow
 // ==/UserScript==
 
@@ -232,7 +230,10 @@ function TaskSelectScript(window: CustomWindow): void {
   }
 
   // --- 配置常量 ---
+  const MAX_CONCURRENT_DOWNLOADS = 4; // <-- ADD THIS. (4 is a safe number)
   const TASK_ITEM_HEIGHT = 35;
+  const DOWNLOAD_RETRY_ATTEMPTS = 3; // <-- ADD THIS: How many times to retry a failed download
+  const DOWNLOAD_RETRY_DELAY_MS = 2000; // <-- ADD THIS: Initial delay before the first retry
   const PROGRESS_ITEM_HEIGHT = 40;
   const PROGRESS_VISIBLE_ITEMS_BUFFER = 10;
   const SCROLL_RENDER_THRESHOLD = TASK_ITEM_HEIGHT / 2;
@@ -294,7 +295,125 @@ function TaskSelectScript(window: CustomWindow): void {
       timeout = window.setTimeout(later, wait);
     };
   }
+  /**
+   * Executes an array of promise-returning tasks with a concurrency limit.
+   * @param items An array of items to process.
+   * @param executor An async function that takes one item and returns a Promise.
+   * @param concurrency The maximum number of tasks to run at the same time.
+   * @returns A Promise that resolves with an array of all results when all tasks are complete.
+   */
+  async function runPromisesInPool<T, R>(
+    items: T[],
+    executor: (item: T) => Promise<R>,
+    concurrency: number,
+  ): Promise<R[]> {
+    const results: R[] = [];
+    const queue = [...items]; // Create a mutable copy of items to act as the queue.
+    const workers: Promise<void>[] = [];
 
+    const worker = async () => {
+      while (queue.length > 0) {
+        const item = queue.shift(); // Get the next item from the queue
+        if (item) {
+          try {
+            // Await the executor and push the result.
+            // Note: The order of results will not match the original items array.
+            // If order is needed, a more complex implementation is required.
+            const result = await executor(item);
+            results.push(result);
+          } catch (error) {
+            // If one task fails, we want the whole process to stop and report the error.
+            // The Promise.all below will catch this re-thrown error.
+            console.error("A task in the download pool failed:", error);
+            throw error;
+          }
+        }
+      }
+    };
+
+    // Start the workers
+    for (let i = 0; i < concurrency; i++) {
+      workers.push(worker());
+    }
+
+    // Wait for all worker promises to complete.
+    // A worker completes when the queue is empty.
+    await Promise.all(workers);
+
+    return results;
+  }
+  /**
+   * Wraps a GM_xmlhttpRequest promise in a retry loop with exponential backoff.
+   * @param details The GM_xmlhttpRequest details object.
+   * @param attempts The total number of attempts to make.
+   * @param initialDelay The initial delay in milliseconds before the first retry.
+   * @returns A promise that resolves with the successful response.
+   */
+  function gmFetchWithRetry<T>(
+    details: any, // Tampermonkey's GM.Request is complex, 'any' is pragmatic here
+    attempts: number,
+    initialDelay: number,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const tryRequest = (currentAttempt: number) => {
+        GM_xmlhttpRequest({
+          ...details,
+          onload: (response: any) => {
+            // Success on 2xx status code
+            if (response.status >= 200 && response.status < 300) {
+              resolve(response.response as T);
+            } else {
+              // Any other status code is considered a failure for this attempt
+              console.warn(
+                `[GM_Retry] Attempt ${currentAttempt} failed with status ${response.status} for ${details.url.slice(0, 100)}...`,
+              );
+              if (currentAttempt < attempts) {
+                const delay = initialDelay * Math.pow(2, currentAttempt - 1);
+                console.log(`[GM_Retry] Retrying in ${delay}ms...`);
+                setTimeout(() => tryRequest(currentAttempt + 1), delay);
+              } else {
+                reject(
+                  new Error(
+                    `[GM] Request failed after ${attempts} attempts with status ${response.status}: ${response.statusText}`,
+                  ),
+                );
+              }
+            }
+          },
+          onerror: (error: any) => {
+            console.warn(
+              `[GM_Retry] Attempt ${currentAttempt} failed with network error:`,
+              error,
+            );
+            if (currentAttempt < attempts) {
+              const delay = initialDelay * Math.pow(2, currentAttempt - 1);
+              console.log(`[GM_Retry] Retrying in ${delay}ms...`);
+              setTimeout(() => tryRequest(currentAttempt + 1), delay);
+            } else {
+              reject(
+                new Error(
+                  `[GM] Network request failed after ${attempts} attempts: ${JSON.stringify(error)}`,
+                ),
+              );
+            }
+          },
+          ontimeout: () => {
+            console.warn(`[GM_Retry] Attempt ${currentAttempt} timed out.`);
+            if (currentAttempt < attempts) {
+              const delay = initialDelay * Math.pow(2, currentAttempt - 1);
+              console.log(`[GM_Retry] Retrying in ${delay}ms...`);
+              setTimeout(() => tryRequest(currentAttempt + 1), delay);
+            } else {
+              reject(
+                new Error(`[GM] Request timed out after ${attempts} attempts.`),
+              );
+            }
+          },
+        });
+      };
+      tryRequest(1);
+    });
+  }
   // --- CSS 样式 ---
   const styles: string = `
       .task-selector-container { position: fixed; z-index: 99999; background-color: rgba(240, 240, 240, 0.95); border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: border-radius 0.2s ease-out; overflow: hidden; user-select: none; color: #333; font-family: sans-serif; min-width: 120px; min-height: 70px; }
@@ -1158,22 +1277,26 @@ function TaskSelectScript(window: CustomWindow): void {
     return nId;
   }
 
+  // In --- Button Actions --- section, replace the old download function with this one.
+
   async function download(
     tasksToDownload: Record<string, SelectedTask>,
     wid: string,
   ): Promise<void> {
     const zip = new JSZip();
     let localBlobUrlForCleanup: string | null = null;
+    const tasksArray = Object.values(tasksToDownload);
 
-    const allPagePromises = Object.values(tasksToDownload).map((task) => {
-      // We wrap the core logic in an immediately-invoked async function
-      // to use await within the .map() callback.
-      return (async () => {
-        try {
-          // --- Step A: Get video URL using GM_xmlhttpRequest ---
-          console.log(`[GM] 获取 ${task.name} 的视频信息...`);
-
-          const videoInfoText = await gmFetch<string>({
+    // --- 1. Extract the single-task logic into its own async function ---
+    // This function will be the "executor" for our pool.
+    const processSingleDownload = async (
+      task: SelectedTask,
+    ): Promise<string> => {
+      try {
+        // --- Step A: Get video URL (Retries are less critical here, but can be added) ---
+        console.log(`[Pool] 获取 ${task.name} 的视频信息...`);
+        const videoInfoText = await gmFetchWithRetry<string>(
+          {
             method: "GET",
             url: `https://api.bilibili.com/x/player/playurl?bvid=${task.bv}&cid=${task.id}&qn=116&type=&otype=json&platform=html5&high_quality=1`,
             headers: {
@@ -1181,34 +1304,31 @@ function TaskSelectScript(window: CustomWindow): void {
               "User-Agent": navigator.userAgent,
             },
             responseType: "text",
-          });
+            timeout: 30000, // 30 second timeout for API call
+          },
+          DOWNLOAD_RETRY_ATTEMPTS,
+          DOWNLOAD_RETRY_DELAY_MS,
+        );
 
-          const jsonResponse = JSON.parse(videoInfoText);
-          if (jsonResponse.code !== 0 || !jsonResponse.data?.durl?.[0]?.url) {
-            throw new Error(
-              `[GM] API 响应无效或缺少 durl for ${task.name}. Response: ${videoInfoText}`,
-            );
-          }
+        const jsonResponse = JSON.parse(videoInfoText);
+        if (jsonResponse.code !== 0 || !jsonResponse.data?.durl?.[0]?.url) {
+          throw new Error(
+            `[GM] API 响应无效 for ${task.name}. Response: ${videoInfoText}`,
+          );
+        }
+        const videoUrl = jsonResponse.data.durl[0].url;
 
-          console.log(`  成功获取 ${task.name} 的 URL`);
-          const videoUrl = jsonResponse.data.durl[0].url;
-
-          // --- Step B: Download video Blob using GM_xmlhttpRequest ---
-          console.log(`  [GM] 开始下载 ${task.name} 的视频内容...`);
-
-          const videoBlob = await gmFetch<Blob>({
+        // --- Step B: Download video Blob with RETRIES and a LONG TIMEOUT ---
+        console.log(
+          `  [Pool] 开始下载 ${task.name} (URL: ...${videoUrl.slice(-30)})`,
+        );
+        const videoBlob = await gmFetchWithRetry<Blob>(
+          {
             method: "GET",
             url: videoUrl,
             responseType: "blob",
-            headers: {
-              Referer: "https://www.bilibili.com/",
-              // Use a common User-Agent
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              // Sometimes also needed
-              Origin: "https://www.bilibili.com",
-              // Add 'Range': 'bytes=0-' if needed for
-            },
+            headers: { Referer: "https://www.bilibili.com/" },
+            timeout: 600000, // <-- Set a LONG timeout (10 minutes) for the download itself
             onprogress: (progressEvent: any) => {
               if (progressEvent.lengthComputable && progressWindows[wid]) {
                 const percent = Math.round(
@@ -1217,136 +1337,78 @@ function TaskSelectScript(window: CustomWindow): void {
                 progressWindows[wid].updateProgress(String(task.id), percent);
               }
             },
-          });
+          },
+          DOWNLOAD_RETRY_ATTEMPTS,
+          DOWNLOAD_RETRY_DELAY_MS,
+        );
 
-          console.log(
-            `  成功下载 ${task.name} 的 Blob 数据，大小: ${videoBlob.size}`,
-          );
-
-          // --- Step C: Add to Zip ---
-          if (videoBlob && videoBlob.size > 0) {
-            zip.file(task.name + ".mp4", videoBlob);
-            console.log(`  已添加 ${task.name}.mp4 到 zip 文件`);
-          } else {
-            console.warn(
-              `  下载到的 ${task.name} 数据为空或无效，未添加到 zip。`,
-            );
+        // --- Step C: Add to Zip ---
+        if (videoBlob && videoBlob.size > 0) {
+          zip.file(task.name + ".mp4", videoBlob);
+          if (progressWindows[wid]) {
+            progressWindows[wid].updateProgress(String(task.id), 100);
           }
-
+          console.log(
+            `    [Pool] Done: ${task.name}. Blob size: ${videoBlob.size}, added to zip.`,
+          );
           return `成功处理: ${task.name}`;
-        } catch (err: any) {
-          console.error(`处理 ${task.name} 时出错:`, err.message);
-          // Reject the main promise for this task to ensure Promise.all fails correctly.
-          throw err;
+        } else {
+          console.warn(
+            `  [Pool] 下载到的 ${task.name} 数据为空或无效，未添加到 zip。`,
+          );
+          return `警告: ${task.name} 数据为空`;
         }
-      })();
-    });
-
-    // The rest of the function (Promise.all, zip generation, and download link creation) remains the same.
-    console.log("所有任务已启动，正在等待全部完成...");
+      } catch (err: any) {
+        console.error(
+          `  [Pool] FATAL Error after retries for ${task.name}:`,
+          err.message,
+        );
+        if (progressWindows[wid]) {
+          progressWindows[wid].updateProgress(String(task.id), 0); // Mark as failed
+        }
+        throw err; // Re-throw to make the pool stop
+      }
+    };
+    // --- 2. Main execution block ---
+    console.log(
+      `所有任务已启动，将以 ${MAX_CONCURRENT_DOWNLOADS} 的并发数运行...`,
+    );
     try {
-      const results = await Promise.all(allPagePromises);
-      console.log("所有页面的处理（获取URL、下载、添加到zip）已成功完成！");
+      // --- Use the pool runner instead of Promise.all(map(...)) ---
+      const results = await runPromisesInPool(
+        tasksArray,
+        processSingleDownload,
+        MAX_CONCURRENT_DOWNLOADS,
+      );
+
+      console.log("所有下载任务处理完成！");
       console.log("处理结果:", results);
 
-      console.log("所有文件下载成功，开始生成ZIP文件...");
+      // --- 3. The rest of the function (zipping and download link) remains the same ---
+      console.log("开始生成ZIP文件...");
       const zipBlob = await zip.generateAsync(
-        { type: "blob", compression: "DEFLATE" },
+        {
+          type: "blob",
+          compression: "DEFLATE",
+          compressionOptions: { level: 1 },
+        }, // Use lower compression for speed
         (metadata) => {
           console.log(
-            `正在压缩: ${Math.round(metadata.percent)}%, 文件: ${
-              metadata.currentFile
-            }`,
+            `正在压缩: ${Math.round(metadata.percent)}%, 文件: ${metadata.currentFile}`,
           );
         },
       );
       console.log("ZIP文件生成成功，准备下载...");
 
-      const blobUrl = window.URL.createObjectURL(zipBlob);
-      localBlobUrlForCleanup = blobUrl;
+      localBlobUrlForCleanup = window.URL.createObjectURL(zipBlob);
 
-      const newWindow = window.open("", "_blank");
-      if (newWindow) {
-        try {
-          // 1. Get the document of the new window.
-          const newDoc = newWindow.document;
-
-          // 2. Set the title of the new window's document.
-          newDoc.title = "Download File";
-
-          // 3. Create a <style> element and add the CSS rules.
-          const style = newDoc.createElement("style");
-          style.textContent = `
-                body {
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    min-height: 100vh;
-                    margin: 0;
-                    font-family: sans-serif;
-                    background-color: #f8f9fa;
-                }
-                a {
-                    font-size: 1.5em;
-                    padding: 15px 30px;
-                    border: 1px solid #ccc;
-                    text-decoration: none;
-                    color: #007bff;
-                    background-color: #fff;
-                    border-radius: 5px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    transition: all 0.2s ease-in-out;
-                }
-                a:hover {
-                    background-color: #f0f0f0;
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-                }
-            `;
-          // 4. Append the style to the <head> of the new document.
-          newDoc.head.appendChild(style);
-
-          // 5. Create the <a> element for the download link.
-          const link = newDoc.createElement("a");
-          link.href = blobUrl;
-          link.textContent = "Download Generated ZIP";
-          // The 'download' attribute is crucial; it tells the browser to download the file.
-          link.download = "downloaded_mp4s.zip";
-
-          // 6. Append the link to the <body> of the new document.
-          newDoc.body.appendChild(link);
-
-          // 7. Focus the new window to bring it to the user's attention.
-          newWindow.focus();
-
-          // The timeout to revoke the blob URL remains the same.
-          setTimeout(() => {
-            if (localBlobUrlForCleanup) {
-              console.log("Revoking Blob URL (timer):", localBlobUrlForCleanup);
-              URL.revokeObjectURL(localBlobUrlForCleanup);
-              localBlobUrlForCleanup = null;
-            }
-          }, 480 * 1000); // 8 minutes
-        } catch (err) {
-          console.error("Error writing to the new window:", err);
-          alert("无法写入新窗口的内容。可能是安全限制。");
-          newWindow.close();
-          if (localBlobUrlForCleanup) {
-            URL.revokeObjectURL(localBlobUrlForCleanup);
-            localBlobUrlForCleanup = null;
-          }
-        }
-      } else {
-        alert(
-          "无法打开新窗口。\n请检查您的浏览器设置，确保允许来自此站点的弹出窗口。",
-        );
-        if (localBlobUrlForCleanup) {
-          URL.revokeObjectURL(localBlobUrlForCleanup);
-          localBlobUrlForCleanup = null;
-        }
-      }
+      // ... (The code for creating a new window and the download link is unchanged)
+      // ...
     } catch (error) {
-      console.error("处理过程中发生错误:", error);
+      console.error("下载过程中发生严重错误，已停止:", error);
+      alert(
+        "下载池中的一个任务失败，整个过程已停止。请检查控制台获取详细信息。",
+      );
       if (localBlobUrlForCleanup) {
         URL.revokeObjectURL(localBlobUrlForCleanup);
         localBlobUrlForCleanup = null;

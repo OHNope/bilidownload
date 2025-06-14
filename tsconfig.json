@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // 💡 关键点: 确保 'moduleResolution' 设置为 'node'
+    // 这告诉 TypeScript (以及遵循它的 esbuild) 使用 Node.js 的模块解析策略，
+    // 它能正确地处理不带扩展名的导入。
+    "moduleResolution": "node"
+  },
+  "include": ["src/**/*"]
+}

@@ -1,0 +1,17 @@
+// ==UserScript==
+// @name         BiliBiliDownload(TS)
+// @version      0.1
+// @description  BILIBILI DOWNLOAD
+// @author       OHNope
+// @match        https://www.bilibili.com/video*
+// @match        https://www.bilibili.com/*bvid*
+// @match        https://space.bilibili.com/*
+// @require      https://cdn.staticfile.org/jszip/3.5.0/jszip.min.js
+// @grant        GM_xmlhttpRequest
+// @connect      api.bilibili.com
+// @connect      bilibili.com
+// @connect      bilivideo.com
+// @connect      hdslb.com
+// @connect      akamaized.net
+// @grant unsafeWindow
+// ==/UserScript==

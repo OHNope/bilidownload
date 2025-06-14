@@ -145,7 +145,6 @@ interface TaskSelectorManagerAPI {
     taskId: string,
     progress: number,
   ) => void; // taskId is cid
-  generateTestData: (numTabs?: number, tasksPerTab?: number) => void;
   getSelectedTaskIds: () => string[]; // Returns selected CIDs
   destroy: () => void;
   selectTasksByBv: (
@@ -2347,33 +2346,6 @@ function TaskSelectScript(window: CustomWindow): void {
 
     updateTaskProgress: (wId, tId, p) => {
       progressWindows[String(wId)]?.updateProgress(String(tId), p);
-    },
-
-    generateTestData: (nT = 5, tPT = 100) => {
-      console.log(`Generating test data: ${nT} tabs, ${tPT} tasks per tab...`);
-      for (let i = 1; i <= nT; i++) {
-        const tid = `tab-${i}`;
-        const tn = `任务组 ${i}`;
-        const ts: { id: string; name: string; bv: string }[] = [];
-        for (let j = 1; j <= tPT; j++) {
-          const tskId = `task-${i}-${String(j).padStart(3, "0")}`;
-          ts.push({
-            id: tskId,
-            name: `任务 ${i}-${String(j).padStart(3, "0")} (Detail ${Math.random().toFixed(5)})`,
-            bv: `BVtest${i}${j}`, // Dummy BV
-          });
-        }
-        this.addTaskData(tid, tn, ts);
-      }
-      console.log("Test data generation complete.");
-      // If current tab was affected or is new, trigger render
-      if (currentTabId && !windowState.collapsed && taskListContainer) {
-        if (tabStates[currentTabId]) {
-          tabStates[currentTabId].needsRender = true;
-          tabStates[currentTabId].lastRenderedScrollTop = -1;
-        }
-        scheduleTick();
-      }
     },
 
     getSelectedTaskIds: () => {

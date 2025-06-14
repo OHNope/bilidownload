@@ -17,7 +17,12 @@
 // ==/UserScript==
 
 // --- TypeScript Type Definitions ---
-declare const GM_xmlhttpRequest: (details: any) => void;
+interface GmXhrHandle {
+  abort: () => void;
+}
+
+// REPLACE THE OLD DECLARATION WITH THIS CORRECTED ONE
+declare const GM_xmlhttpRequest: (details: any) => GmXhrHandle;
 declare var JSZip: {
   new (): JSZipInstance;
 };
@@ -89,9 +94,19 @@ interface WindowUiState {
   height: string;
 }
 
+// MODIFIED
+type TaskDownloadStatus =
+  | "pending"
+  | "downloading"
+  | "retrying"
+  | "completed"
+  | "failed"
+  | "restarted";
+
 interface ProgressTaskItem extends SelectedTask {
   progress: number;
   windowId: string;
+  status: TaskDownloadStatus; // 新增字段
 }
 
 interface ProgressWindowState {
@@ -115,12 +130,7 @@ interface ProgressWindowData {
   updateProgress: (taskId: string, progress: number) => void;
   renderItems: (force?: boolean) => void;
   handleScroll: () => void;
-  handleMouseDownDrag: (event: MouseEvent) => void;
-  handleMouseMoveDrag: ((event: MouseEvent) => void) | null;
-  handleMouseUpDrag: ((event: MouseEvent) => void) | null;
-  handleMouseDownResize: (event: MouseEvent) => void;
-  handleMouseMoveResize: ((event: MouseEvent) => void) | null;
-  handleMouseUpResize: ((event: MouseEvent) => void) | null;
+  cleanupFunctions: (() => void)[];
 }
 // Extend Window interface for global properties
 // --- TypeScript Type Definitions ---
@@ -229,7 +239,7 @@ function TaskSelectScript(window: CustomWindow): void {
   }
 
   // --- 配置常量 ---
-  const MAX_CONCURRENT_DOWNLOADS = 4; // <-- ADD THIS. (4 is a safe number)
+  const MAX_CONCURRENT_DOWNLOADS = 10; // <-- ADD THIS. (4 is a safe number)
   const TASK_ITEM_HEIGHT = 35;
   const DOWNLOAD_RETRY_ATTEMPTS = 3; // <-- ADD THIS: How many times to retry a failed download
   const DOWNLOAD_RETRY_DELAY_MS = 2000; // <-- ADD THIS: Initial delay before the first retry
@@ -242,7 +252,8 @@ function TaskSelectScript(window: CustomWindow): void {
 
   // --- 核心状态管理 ---
   let allTasksData: Record<string, TabData> = {};
-  let selectedTasks: Record<string, SelectedTask> = {};
+  let activeDownloads = new Map<string, { abort: () => void }>();
+
   let currentTabId: string | null = null;
   let tabStates: Record<string, TabState> = {};
   let windowState: WindowUiState = {
@@ -252,22 +263,29 @@ function TaskSelectScript(window: CustomWindow): void {
     width: "350px",
     height: "450px",
   };
-  let isDragging = false;
-  // --- 核心状态管理 ---
-  // ... other state variables
-  let dragOffset: { x: number; y: number; width?: number; height?: number } = {
-    x: 0,
-    y: 0,
-  };
+
+  // NEW: A Set to hold the IDs of actively selected (but not yet confirmed) tasks.
+  let selectedTaskIds = new Set<string>();
+
+  // NEW: A Set to hold the IDs of tasks that have been confirmed for download.
+  // This drives the "marked" visual style.
+  let markedTaskIds = new Set<string>();
+  let taskMap = new Map<string, Task>();
+  // NEW: An array to hold all cleanup functions for listeners.
+  const globalCleanupFunctions: (() => void)[] = [];
+
   // ... other state variables
   let isResizing = false;
+  void isResizing;
   let resizeHandle: HTMLElement | null = null;
+  void resizeHandle;
   let isSelectingBox = false;
   let selectionBoxStart = { x: 0, y: 0 };
   let selectionBoxElement: HTMLDivElement | null = null;
-  let initialSelectedInTabForBoxOp: Record<string, boolean> = {};
+  let initialSelectedInTabForBoxOp = new Set<string>();
   let progressWindows: Record<string, ProgressWindowData> = {};
   let progressWindowCounter = 0;
+
   let tickScheduled = false;
 
   // --- DOM 元素引用 ---
@@ -292,6 +310,181 @@ function TaskSelectScript(window: CustomWindow): void {
       };
       clearTimeout(timeout);
       timeout = window.setTimeout(later, wait);
+    };
+  }
+  // --- 工具函数 --- (Add these new functions here)
+
+  /**
+   * Creates a generic drag handler for an element.
+   * @param options - Configuration for the drag behavior.
+   * @returns A destroy function to remove the event listener.
+   */
+  function createDragHandler(options: {
+    triggerElement: HTMLElement;
+    movableElement: HTMLElement;
+    state: { top: string; left: string }; // Object to store final position
+    onDragStart?: () => void;
+    onDragEnd?: () => void;
+  }): () => void {
+    const { triggerElement, movableElement, state, onDragStart, onDragEnd } =
+      options;
+    let dragOffset = { x: 0, y: 0 };
+    let isDragging = false;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!isDragging) return;
+      event.preventDefault();
+      let newTop = event.clientY - dragOffset.y;
+      let newLeft = event.clientX - dragOffset.x;
+
+      newTop = Math.max(
+        0,
+        Math.min(newTop, window.innerHeight - movableElement.offsetHeight),
+      );
+      newLeft = Math.max(
+        0,
+        Math.min(newLeft, window.innerWidth - movableElement.offsetWidth),
+      );
+
+      movableElement.style.top = `${newTop}px`;
+      movableElement.style.left = `${newLeft}px`;
+    };
+
+    const handleMouseUp = () => {
+      if (!isDragging) return;
+      isDragging = false;
+
+      // Persist the final position
+      state.top = movableElement.style.top;
+      state.left = movableElement.style.left;
+
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      triggerElement.style.cursor = "grab";
+
+      onDragEnd?.();
+    };
+
+    const handleMouseDown = (event: MouseEvent) => {
+      // Ensure we don't trigger on buttons, etc. inside the header
+      if (
+        (event.target as HTMLElement).closest(
+          "button, .task-selector-collapse-indicator, .task-progress-close-btn, .task-progress-resizer",
+        )
+      ) {
+        return;
+      }
+      isDragging = true;
+      const rect = movableElement.getBoundingClientRect();
+      dragOffset = {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      };
+
+      document.addEventListener("mousemove", handleMouseMove, {
+        passive: false,
+      });
+      document.addEventListener("mouseup", handleMouseUp);
+
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "grabbing";
+      triggerElement.style.cursor = "grabbing";
+
+      onDragStart?.();
+    };
+
+    triggerElement.addEventListener("mousedown", handleMouseDown);
+
+    // Return a cleanup function
+    return () => {
+      triggerElement.removeEventListener("mousedown", handleMouseDown);
+    };
+  }
+
+  /**
+   * Creates a generic resize handler for an element.
+   * @param options - Configuration for the resize behavior.
+   * @returns A destroy function to remove the event listener.
+   */
+  function createResizeHandler(options: {
+    resizeHandleElement: HTMLElement;
+    resizableElement: HTMLElement;
+    state: { width: string; height: string };
+    onResize?: () => void;
+    onResizeEnd?: () => void;
+  }): () => void {
+    const {
+      resizeHandleElement,
+      resizableElement,
+      state,
+      onResize,
+      onResizeEnd,
+    } = options;
+    let startPos = { x: 0, y: 0, width: 0, height: 0 };
+    let isResizing = false;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!isResizing) return;
+      event.preventDefault();
+      const dx = event.clientX - startPos.x;
+      const dy = event.clientY - startPos.y;
+
+      const style = getComputedStyle(resizableElement);
+      const minW = parseInt(style.minWidth) || 100;
+      const minH = parseInt(style.minHeight) || 70;
+
+      let newWidth = Math.max(minW, startPos.width + dx);
+      let newHeight = Math.max(minH, startPos.height + dy);
+
+      resizableElement.style.width = `${newWidth}px`;
+      resizableElement.style.height = `${newHeight}px`;
+      onResize?.();
+    };
+
+    const handleMouseUp = () => {
+      if (!isResizing) return;
+      isResizing = false;
+
+      // Persist the final size
+      state.width = resizableElement.style.width;
+      state.height = resizableElement.style.height;
+
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      onResizeEnd?.();
+    };
+
+    const handleMouseDown = (event: MouseEvent) => {
+      event.stopPropagation();
+      event.preventDefault();
+      isResizing = true;
+
+      startPos = {
+        x: event.clientX,
+        y: event.clientY,
+        width: resizableElement.offsetWidth,
+        height: resizableElement.offsetHeight,
+      };
+
+      document.addEventListener("mousemove", handleMouseMove, {
+        passive: false,
+      });
+      document.addEventListener("mouseup", handleMouseUp);
+
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "nwse-resize";
+    };
+
+    resizeHandleElement.addEventListener("mousedown", handleMouseDown);
+
+    return () => {
+      resizeHandleElement.removeEventListener("mousedown", handleMouseDown);
     };
   }
   /**
@@ -348,67 +541,67 @@ function TaskSelectScript(window: CustomWindow): void {
    * @param initialDelay The initial delay in milliseconds before the first retry.
    * @returns A promise that resolves with the successful response.
    */
+  // 在 --- 工具函数 --- 部分
   function gmFetchWithRetry<T>(
-    details: any, // Tampermonkey's GM.Request is complex, 'any' is pragmatic here
+    details: any,
     attempts: number,
     initialDelay: number,
+    // 新增的回调参数
+    callbacks?: {
+      onRetry?: (attempt: number, error: any) => void;
+      onProgress?: (event: any) => void;
+      onStart?: (handle: { abort: () => void }) => void;
+    },
   ): Promise<T> {
+    // 从 details 中提取 onprogress 并传递给 callbacks，保持原 onprogress 逻辑
+    const onProgress = details.onprogress || callbacks?.onProgress;
+
     return new Promise<T>((resolve, reject) => {
       const tryRequest = (currentAttempt: number) => {
-        GM_xmlhttpRequest({
+        const requestHandle = GM_xmlhttpRequest({
           ...details,
+          onprogress: onProgress, // 使用统一的 onprogress
           onload: (response: any) => {
-            // Success on 2xx status code
             if (response.status >= 200 && response.status < 300) {
               resolve(response.response as T);
             } else {
-              // Any other status code is considered a failure for this attempt
-              console.warn(
-                `[GM_Retry] Attempt ${currentAttempt} failed with status ${response.status} for ${details.url.slice(0, 100)}...`,
-              );
+              const error = new Error(`HTTP Status ${response.status}`);
               if (currentAttempt < attempts) {
+                callbacks?.onRetry?.(currentAttempt + 1, error);
                 const delay = initialDelay * Math.pow(2, currentAttempt - 1);
-                console.log(`[GM_Retry] Retrying in ${delay}ms...`);
                 setTimeout(() => tryRequest(currentAttempt + 1), delay);
               } else {
-                reject(
-                  new Error(
-                    `[GM] Request failed after ${attempts} attempts with status ${response.status}: ${response.statusText}`,
-                  ),
-                );
+                reject(error);
               }
             }
           },
           onerror: (error: any) => {
-            console.warn(
-              `[GM_Retry] Attempt ${currentAttempt} failed with network error:`,
-              error,
-            );
             if (currentAttempt < attempts) {
+              callbacks?.onRetry?.(currentAttempt + 1, error);
               const delay = initialDelay * Math.pow(2, currentAttempt - 1);
-              console.log(`[GM_Retry] Retrying in ${delay}ms...`);
               setTimeout(() => tryRequest(currentAttempt + 1), delay);
             } else {
-              reject(
-                new Error(
-                  `[GM] Network request failed after ${attempts} attempts: ${JSON.stringify(error)}`,
-                ),
-              );
+              reject(error);
             }
           },
           ontimeout: () => {
-            console.warn(`[GM_Retry] Attempt ${currentAttempt} timed out.`);
+            const error = new Error("Request timed out");
             if (currentAttempt < attempts) {
+              // *** 调用 onRetry 回调 ***
+              callbacks?.onRetry?.(currentAttempt + 1, error);
               const delay = initialDelay * Math.pow(2, currentAttempt - 1);
-              console.log(`[GM_Retry] Retrying in ${delay}ms...`);
               setTimeout(() => tryRequest(currentAttempt + 1), delay);
             } else {
-              reject(
-                new Error(`[GM] Request timed out after ${attempts} attempts.`),
-              );
+              reject(error);
             }
           },
+          onabort: () => {
+            // When we manually abort, reject the promise immediately.
+            reject(new Error("Request aborted due to network loss."));
+          },
         });
+        // Pass the handle out via the onStart callback
+        callbacks?.onStart?.(requestHandle);
       };
       tryRequest(1);
     });
@@ -430,12 +623,61 @@ function TaskSelectScript(window: CustomWindow): void {
       .task-selector-buttons button { margin-bottom: 8px; padding: 6px 8px; font-size: 12px; cursor: pointer; background-color: #f0f0f0; border: 1px solid #bbb; border-radius: 3px; white-space: nowrap; transition: background-color 0.15s ease; }
       .task-selector-buttons button:hover { background-color: #d5d5d5; } .task-selector-buttons button:active { background-color: #ccc; }
       .task-selector-content-wrapper { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; }
-      .task-selector-task-list-container { flex-grow: 1; overflow-y: auto; overflow-x: hidden; padding: 0 5px; position: relative; scrollbar-width: none; -ms-overflow-style: none; }
-      .task-selector-task-list-container::-webkit-scrollbar { display: none; }
-      .task-selector-task-list-container::before, .task-selector-task-list-container::after { content: ''; display: block; height: 5px; }
-      .task-selector-task-item { padding: 5px 8px; margin: 0 0 5px 0; background-color: #fff; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: ${
-        TASK_ITEM_HEIGHT - 12
-      }px; display: flex; align-items: center; transition: background-color 0.1s ease, border-color 0.1s ease; position: relative; user-select: none; }
+
+
+      .task-selector-task-list-container {
+          flex-grow: 1;
+          overflow-y: auto;
+          overflow-x: hidden;
+          /* MODIFICATION: Add position relative */
+          position: relative;
+          -ms-overflow-style: none;
+          scrollbar-width: thin; /* It's better to see the scrollbar for virtual scroll */
+      }
+      /* Optional: Style the scrollbar if not hiding it */
+      .task-selector-task-list-container::-webkit-scrollbar {
+          width: 8px;
+      }
+      .task-selector-task-list-container::-webkit-scrollbar-thumb {
+          background-color: #c1c1c1;
+          border-radius: 4px;
+      }
+
+      /* MODIFICATION: Task items are now positioned absolutely */
+      .task-selector-task-item {
+          padding: 5px 8px;
+          margin: 0; /* Margin is no longer needed */
+          background-color: #fff;
+          border: 1px solid #ddd;
+          border-radius: 3px;
+          cursor: pointer;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          display: flex;
+          align-items: center;
+          transition: background-color 0.1s ease, border-color 0.1s ease;
+
+          /* --- NEW VIRTUALIZATION STYLES --- */
+          position: absolute;
+          top: 0;
+          left: 5px; /* Corresponds to container padding */
+          right: 5px; /* Corresponds to container padding */
+          box-sizing: border-box; /* Crucial for correct height/width */
+          /* Height is now set via JS, but we can keep the base calc for consistency */
+          height: ${TASK_ITEM_HEIGHT - 12}px;
+      }
+
+      /* NEW: Spacer element style */
+      .virtual-scroll-spacer {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 1px;
+          height: 0; /* Height will be set by JS */
+          z-index: -1; /* Keep it out of the way */
+      }
+
       .task-selector-task-item.selected { background-color: #d0eaff; border-color: #a0caff; font-weight: bold; }
       .task-selector-task-item.marked { background-color: #e0ffe0 !important; border-color: #a0cca0 !important; opacity: 0.7; }
       .task-selector-tabs-container { border-top: 1px solid #ccc; padding: 5px 5px 0 5px; background-color: #e0e0e0; overflow-x: auto; white-space: nowrap; flex-shrink: 0; scrollbar-width: none; -ms-overflow-style: none; }
@@ -459,8 +701,36 @@ function TaskSelectScript(window: CustomWindow): void {
       }px; height: auto; }
       .task-progress-item-name { font-size: 12px; margin-bottom: 4px; white-space: normal; word-break: break-word; }
       .task-progress-bar-container { height: 10px; background-color: #e0e0e0; border-radius: 5px; overflow: hidden; border: 1px solid #d0d0d0; flex-shrink: 0; margin-top: auto; }
-      .task-progress-bar { height: 100%; width: 0%; background-color: #76c7c0; border-radius: 5px 0 0 5px; transition: width 0.3s ease-out; }
-      .task-progress-bar.completed { background-color: #a0d8a0; border-radius: 5px; }
+
+      .task-progress-bar {
+        height: 100%;
+        width: 0%;
+        background-color: #76c7c0; /* Default/Downloading color */
+        border-radius: 5px 0 0 5px;
+        transition: width 0.3s ease-out, background-color 0.3s ease-in-out; /* 添加 background-color 过渡 */
+      }
+      .task-progress-bar.status-retrying {
+              background-color: #f0ad4e; /* Orange for retrying */
+            }
+
+            /* ADD THIS NEW STYLE */
+            .task-progress-bar.status-restarted {
+              background-color: #5bc0de; /* Info blue */
+            }
+
+            .task-progress-bar.status-failed {
+              background-color: #d9534f; /* Red for failure */
+              width: 100% !important; /* 失败时也填满，但用红色表示 */
+            }
+
+      /* (可选) 在任务项名称旁边添加状态文本 */
+      .task-progress-item-status-text {
+        font-size: 10px;
+        color: #888;
+        margin-left: 8px;
+        font-style: italic;
+      }
+
       .task-progress-resizer { position: absolute; width: 12px; height: 12px; right: 0; bottom: 0; cursor: nwse-resize; z-index: 10; user-select: none; -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; }
       .task-selector-parent-task {
     font-weight: bold;
@@ -518,12 +788,12 @@ function TaskSelectScript(window: CustomWindow): void {
       scheduleTick();
     }
   }
-  function createParentTaskNode(parentTask: ParentTask): DocumentFragment {
-    const fragment = document.createDocumentFragment();
+  function createParentTaskNode(parentTask: ParentTask): HTMLDivElement {
     const pItem = document.createElement("div");
     pItem.className = "task-selector-task-item task-selector-parent-task";
     pItem.dataset.bvId = parentTask.bv;
-    pItem.style.height = `${PARENT_TASK_ITEM_HEIGHT - 12}px`;
+
+    pItem.style.height = `${PARENT_TASK_ITEM_HEIGHT}px`;
 
     // --- Expander Icon ---
     const expander = document.createElement("span");
@@ -549,21 +819,12 @@ function TaskSelectScript(window: CustomWindow): void {
       toggleParentTaskExpansion(parentTask);
     });
 
+    pItem.setAttribute("draggable", "false");
     pItem.appendChild(expander);
     pItem.appendChild(titleSpan);
-
     pItem.setAttribute("draggable", "false");
-    fragment.appendChild(pItem);
 
-    // Append child nodes if the parent is expanded
-    if (parentTask.isExpanded) {
-      parentTask.children.forEach((childTask) => {
-        fragment.appendChild(
-          createChildTaskNode(childTask, parentTask.bv, parentTask.MediaId),
-        );
-      });
-    }
-    return fragment;
+    return pItem; // Return the element directly
   }
 
   function createChildTaskNode(
@@ -578,13 +839,15 @@ function TaskSelectScript(window: CustomWindow): void {
     i.dataset.taskId = task.id; // cid
     i.dataset.MediaId = MediaId;
     i.dataset.bv = parentBvId; // Store parent BV for easier access
-    i.style.height = `${CHILD_TASK_ITEM_HEIGHT - 12}px`;
+    i.style.height = `${CHILD_TASK_ITEM_HEIGHT}px`; // Set fixed height
     i.style.marginLeft = "20px"; // Indent child tasks
 
-    if (selectedTasks[task.id] && !selectedTasks[task.id].marked)
-      i.classList.add("selected");
-    if (selectedTasks[task.id] && selectedTasks[task.id].marked)
+    // NEW conditions
+    if (markedTaskIds.has(task.id)) {
       i.classList.add("marked");
+    } else if (selectedTaskIds.has(task.id)) {
+      i.classList.add("selected");
+    }
 
     i.addEventListener("click", handleChildTaskClick as EventListener); // New handler
     i.setAttribute("draggable", "false");
@@ -619,6 +882,15 @@ function TaskSelectScript(window: CustomWindow): void {
     }
   }
 
+  // Define the structure for our flattened list
+  interface FlatTaskItem {
+    type: "parent" | "child";
+    data: ParentTask | Task;
+    parent?: ParentTask; // For child tasks
+    top: number;
+    height: number;
+  }
+
   function renderTasksForCurrentTab(forceUpdate: boolean = false): void {
     const state = currentTabId ? tabStates[currentTabId] : null;
     if (
@@ -627,51 +899,118 @@ function TaskSelectScript(window: CustomWindow): void {
       !taskListContainer ||
       !state
     ) {
-      if (taskListContainer)
-        taskListContainer.innerHTML =
-          '<div style="height: 5px;"></div><div style="height: 5px;"></div>'; // Spacers
+      if (taskListContainer) {
+        // Clear everything except the spacer
+        const spacer = taskListContainer.querySelector(
+          ".virtual-scroll-spacer",
+        );
+        taskListContainer.innerHTML = "";
+        if (spacer) taskListContainer.appendChild(spacer);
+      }
       if (state) state.lastRenderedScrollTop = -1;
       return;
     }
 
-    const parentTasks = allTasksData[currentTabId].tasks;
     const scrollTop = taskListContainer.scrollTop;
     const containerHeight = taskListContainer.clientHeight;
     state.taskScrollTop = scrollTop;
 
     if (containerHeight <= 0 && !forceUpdate) return;
 
-    // --- Simplified rendering - Iterate all and append ---
-    // This bypasses complex virtualization for now. For large lists, this will be slow.
+    // --- 1. Flatten Data and Calculate Positions ---
+    const flatItems: FlatTaskItem[] = [];
+    let currentY = 5; // Start with top padding of 5px
+    allTasksData[currentTabId].tasks.forEach((parentTask) => {
+      flatItems.push({
+        type: "parent",
+        data: parentTask,
+        top: currentY,
+        height: PARENT_TASK_ITEM_HEIGHT,
+      });
+      currentY += PARENT_TASK_ITEM_HEIGHT;
+      if (parentTask.isExpanded) {
+        parentTask.children.forEach((childTask) => {
+          flatItems.push({
+            type: "child",
+            data: childTask,
+            parent: parentTask,
+            top: currentY,
+            height: CHILD_TASK_ITEM_HEIGHT,
+          });
+          currentY += CHILD_TASK_ITEM_HEIGHT;
+        });
+      }
+    });
+    const totalHeight = currentY + 5; // Add bottom padding
+
+    // --- 2. Update the Spacer Height ---
+    const spacer = taskListContainer.querySelector(
+      ".virtual-scroll-spacer",
+    ) as HTMLDivElement;
+    if (spacer) {
+      spacer.style.height = `${totalHeight}px`;
+    }
+
+    // --- 3. Determine the Visible Range ---
+    const buffer = 10; // Render 10 items above and below the viewport
+    let startIndex = flatItems.findIndex(
+      (item) => item.top + item.height > scrollTop,
+    );
+    let endIndex = flatItems.findIndex(
+      (item) => item.top > scrollTop + containerHeight,
+    );
+
+    // Adjust for edge cases and buffer
+    startIndex = Math.max(0, startIndex - buffer);
+    if (endIndex === -1) {
+      // Scrolled to the bottom
+      endIndex = flatItems.length;
+    } else {
+      endIndex = Math.min(flatItems.length, endIndex + buffer);
+    }
+
+    // --- 4. Render Only the Visible Slice ---
     const fragment = document.createDocumentFragment();
-    taskListContainer.innerHTML = ""; // Clear
+    const itemsToRender = flatItems.slice(startIndex, endIndex);
 
-    const topSpacer = document.createElement("div"); // Keep top spacer for padding
-    topSpacer.style.height = `5px`;
-    fragment.appendChild(topSpacer);
+    itemsToRender.forEach((item) => {
+      let node: HTMLDivElement;
+      if (item.type === "parent") {
+        node = createParentTaskNode(item.data as ParentTask);
+      } else {
+        // The child node needs its parent's info
+        const childData = item.data as Task;
+        const parentData = item.parent!; // We know it exists for child items
+        node = createChildTaskNode(
+          childData,
+          parentData.bv,
+          parentData.MediaId,
+        );
+      }
 
-    parentTasks.forEach((pt) => {
-      fragment.appendChild(createParentTaskNode(pt));
+      // Position the node absolutely using transform for performance
+      node.style.transform = `translateY(${item.top}px)`;
+      fragment.appendChild(node);
     });
 
-    const bottomSpacer = document.createElement("div"); // Keep bottom spacer
-    bottomSpacer.style.height = `5px`;
-    fragment.appendChild(bottomSpacer);
-
+    // --- 5. Efficiently Update the DOM ---
+    // Remove all previous task items, but leave the spacer untouched
+    while (taskListContainer.childElementCount > 1) {
+      taskListContainer.lastChild!.remove();
+    }
     taskListContainer.appendChild(fragment);
-    state.lastRenderedScrollTop = scrollTop; // This isn't accurate for non-virtualized, but for consistency
+
+    state.lastRenderedScrollTop = scrollTop;
     state.needsRender = false;
 
+    // This part of your logic for forcing a scroll position remains valid
     if (forceUpdate) {
       const forcedScrollTop = state.taskScrollTop ?? 0;
       requestAnimationFrame(() => {
         if (taskListContainer) taskListContainer.scrollTop = forcedScrollTop;
-        // state.lastRenderedScrollTop = taskListContainer?.scrollTop ?? forcedScrollTop; // Re-set after scroll
       });
     }
-    // console.log("Rendered tasks for tab:", currentTabId);
   }
-
   // --- Scroll / Tick Functions ---
   function scheduleTick(): void {
     if (!tickScheduled) {
@@ -718,6 +1057,93 @@ function TaskSelectScript(window: CustomWindow): void {
   }
 
   // --- Event Handlers ---
+  /**
+   * Handles the browser's 'offline' event.
+   */
+  function handleConnectionLost(): void {
+    console.warn("[Network] Connection lost. Aborting all active downloads...");
+    if (activeDownloads.size === 0) {
+      console.log("[Network] No active downloads to abort.");
+      return;
+    }
+
+    // Abort each active download
+    for (const [taskId, handle] of activeDownloads.entries()) {
+      try {
+        console.log(
+          `[Network] Aborting active download for task ID: ${taskId}`,
+        );
+        handle.abort();
+      } catch (e) {
+        console.error(`[Network] Error while aborting task ${taskId}:`, e);
+      }
+    }
+
+    // The 'onabort' handler in gmFetchWithRetry will reject the promise,
+    // which then triggers the 'failed' status update.
+    // We can clear the map here as all requests have been told to abort.
+    activeDownloads.clear();
+    console.log("[Network] All active downloads have been aborted.");
+  }
+
+  /**
+   * Handles the browser's 'online' event. Finds all failed tasks and
+   * creates a new download batch for them in a new window.
+   */
+  async function handleConnectionRestored(): Promise<void> {
+    console.log(
+      "[Network] Connection restored. Checking for failed downloads to restart.",
+    );
+
+    const tasksToRestart: SelectedTask[] = [];
+    const originalTasksToUpdate: {
+      task: ProgressTaskItem;
+      windowId: string;
+    }[] = [];
+
+    // Collect all failed tasks from all progress windows
+    for (const windowId in progressWindows) {
+      const pwData = progressWindows[windowId];
+      const isCompleted = pwData.tasks.every((t) => t.status === "completed");
+      if (isCompleted) {
+        continue; // Skip fully completed windows
+      }
+
+      pwData.tasks.forEach((task) => {
+        if (task.status === "failed") {
+          // Ensure we don't add the same task twice
+          if (!tasksToRestart.some((rt) => rt.id === task.id)) {
+            tasksToRestart.push({
+              id: task.id,
+              name: task.name,
+              bv: task.bv,
+              marked: false,
+            });
+            originalTasksToUpdate.push({ task, windowId });
+          }
+        }
+      });
+    }
+
+    if (tasksToRestart.length > 0) {
+      console.log(
+        `[Network] Found ${tasksToRestart.length} failed tasks. Creating a new download batch.`,
+      );
+
+      // Update the UI of the original failed tasks to show they are being handled
+      originalTasksToUpdate.forEach(({ task, windowId }) => {
+        updateTaskStateById(windowId, task.id, { status: "restarted" as any });
+      });
+
+      // Start a new download process for the failed tasks
+      startDownloadBatch(tasksToRestart);
+      alert(
+        `网络已恢复, 已为 ${tasksToRestart.length} 个失败的任务开启了新的下载批次。`,
+      );
+    } else {
+      console.log("[Network] No failed tasks found to restart.");
+    }
+  }
   function handleTabClick(event: MouseEvent): void {
     event.stopPropagation();
     const target = event.target as HTMLElement;
@@ -754,120 +1180,6 @@ function TaskSelectScript(window: CustomWindow): void {
         tabsContainer!.scrollLeft =
           tabStates[currentTabId!]?.tabScrollLeft || 0;
       });
-  }
-
-  function handleMouseDownHeader(event: MouseEvent): void {
-    if (
-      event.target === collapseIndicator ||
-      (event.target as HTMLElement).closest(".task-selector-resizer")
-    )
-      return;
-
-    isDragging = true;
-    const r = container!.getBoundingClientRect();
-    dragOffset = { x: event.clientX - r.left, y: event.clientY - r.top };
-    container!.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "grabbing";
-
-    document.addEventListener("mousemove", handleMouseMoveDrag, {
-      passive: false,
-    });
-    document.addEventListener("mouseup", handleMouseUpDrag);
-  }
-
-  function handleMouseMoveDrag(event: MouseEvent): void {
-    if (!isDragging || !container) return;
-    event.preventDefault();
-    let nt = event.clientY - dragOffset.y;
-    let nl = event.clientX - dragOffset.x;
-    nt = Math.max(0, Math.min(nt, window.innerHeight - container.offsetHeight));
-    nl = Math.max(0, Math.min(nl, window.innerWidth - container.offsetWidth));
-    container.style.top = `${nt}px`;
-    container.style.left = `${nl}px`;
-  }
-
-  function handleMouseUpDrag(): void {
-    if (!isDragging) return;
-    isDragging = false;
-    if (container) {
-      if (windowState.collapsed) container.style.cursor = "grab";
-      else if (header) {
-        container.style.cursor = "";
-        header.style.cursor = "grab";
-      }
-      windowState.top = container.style.top;
-      windowState.left = container.style.left;
-    }
-    document.removeEventListener("mousemove", handleMouseMoveDrag);
-    document.removeEventListener("mouseup", handleMouseUpDrag);
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-  }
-
-  function handleMouseDownResize(event: MouseEvent): void {
-    event.stopPropagation();
-    event.preventDefault();
-    isResizing = true;
-    resizeHandle = event.target as HTMLElement;
-    dragOffset = {
-      x: event.clientX,
-      y: event.clientY,
-      width: container!.offsetWidth,
-      height: container!.offsetHeight,
-    };
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "nwse-resize";
-    document.addEventListener("mousemove", handleMouseMoveResize, {
-      passive: false,
-    });
-    document.addEventListener("mouseup", handleMouseUpResize);
-  }
-
-  function handleMouseMoveResize(event: MouseEvent): void {
-    if (!isResizing || !container) return;
-    event.preventDefault();
-    const dx = event.clientX - dragOffset.x;
-    const dy = event.clientY - dragOffset.y;
-    // 由于 isResizing 为 true，我们确信 dragOffset.width 和 dragOffset.height 存在
-    let nW = dragOffset.width! + dx;
-    let nH = dragOffset.height! + dy;
-    const s = getComputedStyle(container);
-    const minW = parseInt(s.minWidth) || 120;
-    const minH = parseInt(s.minHeight) || 70;
-    nW = Math.max(minW, nW);
-    nH = Math.max(minH, nH);
-    container.style.width = `${nW}px`;
-    container.style.height = `${nH}px`;
-    if (currentTabId && tabStates[currentTabId])
-      tabStates[currentTabId].needsRender = true;
-    Object.values(progressWindows).forEach((pw) => {
-      if (pw.state) pw.state.needsRender = true;
-    });
-    scheduleTick();
-  }
-  function handleMouseUpResize(): void {
-    if (!isResizing) return;
-    isResizing = false;
-    document.removeEventListener("mousemove", handleMouseMoveResize);
-    document.removeEventListener("mouseup", handleMouseUpResize);
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-    if (container) {
-      windowState.width = container.style.width;
-      windowState.height = container.style.height;
-      if (currentTabId && tabStates[currentTabId]) {
-        tabStates[currentTabId].needsRender = true;
-        tabStates[currentTabId].lastRenderedScrollTop = -1;
-      }
-      Object.values(progressWindows).forEach((pw) => {
-        if (pw.state) {
-          pw.state.needsRender = true;
-          pw.state.lastRenderedScrollTop = -1;
-        }
-      });
-      scheduleTick();
-    }
   }
 
   function toggleCollapse(event: MouseEvent): void {
@@ -933,22 +1245,13 @@ function TaskSelectScript(window: CustomWindow): void {
 
     event.preventDefault();
 
+    // --- NEW, EFFICIENT BLOCK ---
+    event.preventDefault(); // Keep this
+
     isSelectingBox = true;
-    initialSelectedInTabForBoxOp = {};
-    if (currentTabId && allTasksData[currentTabId]) {
-      allTasksData[currentTabId].tasks.forEach((parentTask) => {
-        if (parentTask.isExpanded) {
-          parentTask.children.forEach((childTask) => {
-            if (
-              selectedTasks[childTask.id] &&
-              !selectedTasks[childTask.id].marked
-            ) {
-              initialSelectedInTabForBoxOp[childTask.id] = true;
-            }
-          });
-        }
-      });
-    }
+    // The complex loop is replaced by a single, clean line of code.
+    // This creates a new Set containing a snapshot of the currently selected IDs.
+    initialSelectedInTabForBoxOp = new Set(selectedTaskIds);
 
     selectionBoxStart = { x: event.clientX, y: event.clientY };
 
@@ -1023,7 +1326,7 @@ function TaskSelectScript(window: CustomWindow): void {
       document.removeEventListener("mouseup", handleMouseUpSelectBox);
       document.body.style.userSelect = ""; // 恢复文本选择
       if (selectionBoxElement) selectionBoxElement.style.display = "none";
-      initialSelectedInTabForBoxOp = {};
+      initialSelectedInTabForBoxOp = new Set();
       isSelectingBox = false; // 确保重置
       return;
     }
@@ -1044,7 +1347,7 @@ function TaskSelectScript(window: CustomWindow): void {
       document.removeEventListener("mousemove", handleMouseMoveSelectBox);
       document.removeEventListener("mouseup", handleMouseUpSelectBox);
       document.body.style.userSelect = "";
-      initialSelectedInTabForBoxOp = {};
+      initialSelectedInTabForBoxOp = new Set();
       isSelectingBox = false; // Ensure this is always reset
       selectionBoxElement = null;
 
@@ -1055,52 +1358,43 @@ function TaskSelectScript(window: CustomWindow): void {
   function handleChildTaskClick(event: MouseEvent): void {
     event.stopPropagation();
     const targetItem = event.currentTarget as HTMLDivElement;
-    const childTaskId = targetItem.dataset.taskId as string; // This is CID
+    const childTaskId = targetItem.dataset.taskId as string;
     const parentBvId = targetItem.dataset.bv as string;
-    const ParentMediaId = targetItem.dataset.MediaId as string;
+    const parentMediaId = targetItem.dataset.mediaId as string; // Corrected from your file
 
     if (!childTaskId || !parentBvId) return;
 
-    const childTaskData = findChildTaskByIdGlobal(childTaskId); // Helper to find the specific child task object
-    if (!childTaskData) return;
-
-    if (selectedTasks[childTaskId] && !selectedTasks[childTaskId].marked) {
-      // Deselecting child
-      targetItem.classList.remove("selected", "marked");
-      delete selectedTasks[childTaskId];
-    } else {
-      // Selecting child
-      targetItem.classList.add("selected");
-      targetItem.classList.remove("marked");
-      selectedTasks[childTaskId] = { ...childTaskData, marked: false }; // childTaskData already has id, name, bv
+    // Ignore clicks on already processed tasks
+    if (markedTaskIds.has(childTaskId)) {
+      return;
     }
 
-    // Sync with BiliSelectScript for the parent BV
+    // Simple toggle logic using the Set
+    if (selectedTaskIds.has(childTaskId)) {
+      selectedTaskIds.delete(childTaskId);
+      targetItem.classList.remove("selected");
+    } else {
+      selectedTaskIds.add(childTaskId);
+      targetItem.classList.add("selected");
+    }
+
+    // Sync with BiliSelectScript (this logic doesn't change)
     if (window.BiliSelectScriptAPI) {
-      // Check if *any* child of this parentBV is selected
       const anyChildStillSelected =
         TaskSelectorManager.isAnyTaskSelectedForBv(parentBvId);
       window.BiliSelectScriptAPI.selectVideoCardByBv(
         parentBvId,
         anyChildStillSelected,
         true,
-        ParentMediaId,
+        parentMediaId,
       );
     }
   }
 
   // Helper to find a child task by its CID across all tabs/parent tasks
   function findChildTaskByIdGlobal(childId: string): Task | null {
-    for (const tabKey in allTasksData) {
-      const tab = allTasksData[tabKey];
-      for (const parent of tab.tasks) {
-        const foundChild = parent.children.find(
-          (child) => child.id === childId,
-        );
-        if (foundChild) return foundChild;
-      }
-    }
-    return null;
+    // This is now an instant O(1) lookup.
+    return taskMap.get(childId) || null;
   }
   // `findTaskByIdGlobal` might need to be renamed or rethought if its previous meaning was different.
   // The original `findTaskByIdGlobal` might have been looking for what are now parent tasks by their 'id' (which was BV).
@@ -1113,7 +1407,6 @@ function TaskSelectScript(window: CustomWindow): void {
     const boxRectVP = selectionBoxElement.getBoundingClientRect();
     if (boxRectVP.width === 0 && boxRectVP.height === 0 && !isFinal) return;
 
-    // Query only for child task items that are currently rendered
     const childTaskItems = taskListContainer?.querySelectorAll<HTMLDivElement>(
       ".task-selector-child-task",
     );
@@ -1123,12 +1416,11 @@ function TaskSelectScript(window: CustomWindow): void {
 
     childTaskItems.forEach((item) => {
       const itemRectVP = item.getBoundingClientRect();
-      const childTaskId = item.dataset.taskId; // This is the CID
-      const parentBvId = item.dataset.bv; // Parent BV ID
+      const childTaskId = item.dataset.taskId;
+      const parentBvId = item.dataset.bv;
 
-      if (!childTaskId || !parentBvId) return; // Skip if essential data is missing
-
-      const childTaskFullData = findChildTaskByIdGlobal(childTaskId); // For name, etc.
+      if (!childTaskId || !parentBvId) return;
+      if (markedTaskIds.has(childTaskId)) return; // Don't change marked tasks
 
       const overlaps = !(
         itemRectVP.right < boxRectVP.left ||
@@ -1137,72 +1429,31 @@ function TaskSelectScript(window: CustomWindow): void {
         itemRectVP.top > boxRectVP.bottom
       );
 
+      const wasInitiallySelected =
+        initialSelectedInTabForBoxOp.has(childTaskId);
+
       if (isFinal) {
+        // --- Final selection logic (on mouseup) ---
         if (overlaps) {
-          if (initialSelectedInTabForBoxOp[childTaskId]) {
-            // Was selected at start of box op, now toggle OFF
-            delete selectedTasks[childTaskId];
-            item.classList.remove("selected", "marked");
+          if (wasInitiallySelected) {
+            // It was selected, so the drag operation DESELECTS it.
+            selectedTaskIds.delete(childTaskId);
           } else {
-            // Was NOT selected (or was marked) at start, now toggle ON
-            if (!childTaskFullData) {
-              console.warn(
-                `Child task data not found for CID: ${childTaskId} during final box selection.`,
-              );
-              return;
-            }
-            // Update selectedTasks (global state for child tasks)
-            selectedTasks[childTaskId] = {
-              id: childTaskId,
-              name: childTaskFullData.name,
-              marked: false,
-              bv: parentBvId, // Store parent BV
-            };
-            item.classList.add("selected");
-            item.classList.remove("marked");
-          }
-        } else {
-          // Item is OUTSIDE the selection box on mouse up.
-          // Ensure its classList matches the current global `selectedTasks` state.
-          if (
-            selectedTasks[childTaskId] &&
-            !selectedTasks[childTaskId].marked
-          ) {
-            item.classList.add("selected");
-            item.classList.remove("marked");
-          } else if (
-            selectedTasks[childTaskId] &&
-            selectedTasks[childTaskId].marked
-          ) {
-            item.classList.add("marked");
-            item.classList.remove("selected");
-          } else {
-            item.classList.remove("selected", "marked");
+            // It was not selected, so the drag operation SELECTS it.
+            selectedTaskIds.add(childTaskId);
           }
         }
-        bvsAffected.add(parentBvId); // Add parent BV of this child to affected set
+        // After the drag, ensure the item's visual state matches the final truth.
+        item.classList.toggle("selected", selectedTaskIds.has(childTaskId));
+        bvsAffected.add(parentBvId);
       } else {
-        // Previewing selection (mousemove)
+        // --- Preview logic (on mousemove) ---
         if (overlaps) {
-          item.classList.toggle(
-            "selected",
-            !initialSelectedInTabForBoxOp[childTaskId],
-          );
-          item.classList.remove("marked");
+          // If overlapping, its state is the INVERSE of its initial state.
+          item.classList.toggle("selected", !wasInitiallySelected);
         } else {
-          item.classList.toggle(
-            "selected",
-            !!initialSelectedInTabForBoxOp[childTaskId],
-          );
-          if (
-            initialSelectedInTabForBoxOp[childTaskId] &&
-            selectedTasks[childTaskId]?.marked
-          ) {
-            item.classList.remove("selected");
-            item.classList.add("marked");
-          } else {
-            item.classList.remove("marked");
-          }
+          // If not overlapping, its state REVERTS to its initial state.
+          item.classList.toggle("selected", wasInitiallySelected);
         }
       }
     });
@@ -1215,7 +1466,8 @@ function TaskSelectScript(window: CustomWindow): void {
           bvIdToUpdate,
           shouldBeSelectedInBili,
           true,
-          childTaskItems[0].dataset.MediaId,
+          // This part is slightly fragile, might need a better way to get mediaId
+          childTaskItems[0]?.dataset.mediaId,
         );
       });
     }
@@ -1236,42 +1488,91 @@ function TaskSelectScript(window: CustomWindow): void {
   const debouncedTabsScrollSave = debounce(handleTabsScroll, 150);
 
   // --- Button Actions ---
-  function confirmSelection(): string | undefined {
-    // Filter selectedTasks which are sub-tasks (CIDs)
-    const subTasksToProcess: SelectedTask[] = Object.values(
-      selectedTasks,
-    ).filter((t) => t && !t.marked);
-    if (subTasksToProcess.length === 0) return undefined;
+  /**
+   * Initiates a download process for a given array of tasks.
+   * Creates a new progress window and calls the main download function.
+   * @param tasksToStart The tasks to include in the batch.
+   * @returns The ID of the new progress window, or undefined if no tasks were provided.
+   */
+  function startDownloadBatch(
+    tasksToStart: SelectedTask[],
+  ): string | undefined {
+    if (tasksToStart.length === 0) {
+      return undefined;
+    }
 
-    console.log(`Confirming ${subTasksToProcess.length} sub-tasks.`);
-    subTasksToProcess.forEach((st) => {
-      if (selectedTasks[st.id]) selectedTasks[st.id].marked = true;
-    });
+    console.log(
+      `Starting a new download batch for ${tasksToStart.length} tasks.`,
+    );
 
-    // createProgressWindow expects an array of items that look like { id, name, bv, marked(false initially for progress) }
-    // The current subTasksToProcess fits this if we treat its 'id' as the task ID for progress.
-    const progressTasks = subTasksToProcess.map((st) => ({
-      id: st.id, // cid
-      name: st.name, // part name
-      bv: st.bv, // parent bv
-      marked: false, // for progress window, this 'marked' is irrelevant, it's about download state
+    // Create the task objects for the new progress window
+    const progressTasks = tasksToStart.map((st) => ({
+      id: st.id,
+      name: st.name,
+      bv: st.bv,
+      marked: false,
+      progress: 0,
+      windowId: "",
+      status: "pending" as TaskDownloadStatus,
     }));
 
-    const nId = createProgressWindow(progressTasks); // Progress window tracks CIDs
+    const newWindowId = createProgressWindow(progressTasks);
+    console.log(`Created progress window for new batch: ${newWindowId}`);
+
+    // Prepare tasks for the download function
+    const tasksForDownload: Record<string, SelectedTask> = {};
+    tasksToStart.forEach((task) => {
+      tasksForDownload[task.id] = { ...task, marked: true };
+    });
+
+    // Call the main download function
+    download(tasksForDownload, newWindowId);
+
+    return newWindowId;
+  }
+  function confirmSelection(): string | undefined {
+    // 1. Get tasks to process directly from the selectedTaskIds Set.
+    const tasksToProcess = Array.from(selectedTaskIds)
+      .map((id) => findChildTaskByIdGlobal(id)!)
+      .filter(Boolean);
+
+    if (tasksToProcess.length === 0) return undefined;
+
+    console.log(`Confirming ${tasksToProcess.length} sub-tasks.`);
+
+    // 2. Move the IDs from 'selected' to 'marked'.
+    tasksToProcess.forEach((task) => {
+      selectedTaskIds.delete(task.id);
+      markedTaskIds.add(task.id);
+    });
+
+    // 3. The data for the progress window is clean.
+    const progressTasks = tasksToProcess.map((st) => ({
+      id: st.id,
+      name: st.name,
+      bv: st.bv,
+      marked: false, // This is for the progress window's own state, always start at false.
+    }));
+
+    const nId = createProgressWindow(progressTasks);
     console.log(`Created progress window: ${nId}`);
 
-    const newSelectedAfterConfirm: Record<string, SelectedTask> = {};
-    Object.values(selectedTasks).forEach((task) => {
-      if (task.marked) newSelectedAfterConfirm[task.id] = task;
-    });
-    selectedTasks = newSelectedAfterConfirm;
+    // 4. Trigger a re-render to update styles from "selected" to "marked".
+    renderTasksForCurrentTab(true);
 
-    renderTasksForCurrentTab(true); // Re-render to update styles
-    // The `download` function needs to be adapted to handle an array of these sub-task objects.
-    // It already uses task.id (CID) and task.bv.
-    download(selectedTasks, nId); // Pass the currently marked tasks (CIDs)
+    // 5. Create a temporary object for the download function based on marked tasks.
+    // (The download function itself can be refactored later to accept an array).
+    const tasksForDownload: Record<string, SelectedTask> = {};
+    markedTaskIds.forEach((id) => {
+      const taskData = findChildTaskByIdGlobal(id);
+      if (taskData) {
+        tasksForDownload[id] = { ...taskData, marked: true };
+      }
+    });
+
+    download(tasksForDownload, nId);
     console.log(
-      "Selection confirmed. Active (non-marked) selection cleared, marked sub-tasks remain.",
+      "Selection confirmed. Active selection cleared, tasks are now marked for processing.",
     );
     return nId;
   }
@@ -1288,12 +1589,20 @@ function TaskSelectScript(window: CustomWindow): void {
 
     // --- 1. Extract the single-task logic into its own async function ---
     // This function will be the "executor" for our pool.
+    // 在 download 函数内部的 processSingleDownload
+
     const processSingleDownload = async (
       task: SelectedTask,
     ): Promise<string> => {
+      const taskId = String(task.id);
+
       try {
-        // --- Step A: Get video URL (Retries are less critical here, but can be added) ---
-        console.log(`[Pool] 获取 ${task.name} 的视频信息...`);
+        // --- Step A: 获取视频信息 (API调用) ---
+        // 这个也可以重试，但通常不是主要问题，这里保持原样或简化
+        updateTaskStateById(wid, taskId, {
+          status: "downloading",
+          progress: 5,
+        }); // 状态: 开始获取信息
         const videoInfoText = await gmFetchWithRetry<string>(
           {
             method: "GET",
@@ -1310,62 +1619,91 @@ function TaskSelectScript(window: CustomWindow): void {
         );
 
         const jsonResponse = JSON.parse(videoInfoText);
-        if (jsonResponse.code !== 0 || !jsonResponse.data?.durl?.[0]?.url) {
-          throw new Error(
-            `[GM] API 响应无效 for ${task.name}. Response: ${videoInfoText}`,
-          );
-        }
+        // ... 错误检查 ...
         const videoUrl = jsonResponse.data.durl[0].url;
 
-        // --- Step B: Download video Blob with RETRIES and a LONG TIMEOUT ---
-        console.log(
-          `  [Pool] 开始下载 ${task.name} (URL: ...${videoUrl.slice(-30)})`,
-        );
-        const videoBlob = await gmFetchWithRetry<Blob>(
-          {
-            method: "GET",
-            url: videoUrl,
-            responseType: "blob",
-            headers: { Referer: "https://www.bilibili.com/" },
-            timeout: 600000, // <-- Set a LONG timeout (10 minutes) for the download itself
-            onprogress: (progressEvent: any) => {
-              if (progressEvent.lengthComputable && progressWindows[wid]) {
-                const percent = Math.round(
-                  (progressEvent.loaded / progressEvent.total) * 100,
-                );
-                progressWindows[wid].updateProgress(String(task.id), percent);
-              }
+        // --- Step B: 下载视频 Blob ---
+        updateTaskStateById(wid, taskId, { progress: 10 }); // 状态: 准备下载
+        try {
+          const videoBlob = await gmFetchWithRetry<Blob>(
+            {
+              method: "GET",
+              url: videoUrl,
+              responseType: "blob",
+              headers: { Referer: "https://www.bilibili.com/" },
+              timeout: 600000,
             },
-          },
-          DOWNLOAD_RETRY_ATTEMPTS,
-          DOWNLOAD_RETRY_DELAY_MS,
-        );
+            DOWNLOAD_RETRY_ATTEMPTS,
+            DOWNLOAD_RETRY_DELAY_MS,
+            {
+              onStart: (handle) => {
+                // --- KEY CHANGE: Start tracking the download ---
+                activeDownloads.set(taskId, handle);
+                console.log(
+                  `[Download] Started tracking active download for task: ${task.name}`,
+                );
+              },
+              // 关键：在这里提供回调
+              onProgress: (progressEvent: any) => {
+                if (progressEvent.lengthComputable) {
+                  const percent = Math.round(
+                    (progressEvent.loaded / progressEvent.total) * 100,
+                  );
+                  // 下载时，状态是 'downloading'
+                  updateTaskStateById(wid, taskId, {
+                    status: "downloading",
+                    progress: percent,
+                  });
+                }
+              },
+              onRetry: (attempt: number, error: any) => {
+                console.log(
+                  `[Pool] 任务 ${task.name} 第 ${attempt} 次重试，原因:`,
+                  error.message,
+                );
+                // 状态变为 'retrying'，进度可以归零或保持
+                updateTaskStateById(wid, taskId, {
+                  status: "retrying",
+                  progress: 0,
+                });
+              },
+            },
+          );
 
-        // --- Step C: Add to Zip ---
-        if (videoBlob && videoBlob.size > 0) {
-          zip.file(task.name + ".mp4", videoBlob);
-          if (progressWindows[wid]) {
-            progressWindows[wid].updateProgress(String(task.id), 100);
+          // --- Step C: 添加到 Zip ---
+          if (videoBlob && videoBlob.size > 0) {
+            zip.file(task.name + ".mp4", videoBlob);
+            // 最终状态: completed
+            updateTaskStateById(wid, taskId, {
+              status: "completed",
+              progress: 100,
+            });
+            return `成功: ${task.name}`;
+          } else {
+            // 如果blob为空，也标记为失败
+            throw new Error("Downloaded blob is empty or invalid.");
           }
-          console.log(
-            `    [Pool] Done: ${task.name}. Blob size: ${videoBlob.size}, added to zip.`,
-          );
-          return `成功处理: ${task.name}`;
-        } else {
-          console.warn(
-            `  [Pool] 下载到的 ${task.name} 数据为空或无效，未添加到 zip。`,
-          );
-          return `警告: ${task.name} 数据为空`;
+        } finally {
+          // --- KEY CHANGE: Stop tracking when done (success or failure) ---
+          if (activeDownloads.has(taskId)) {
+            activeDownloads.delete(taskId);
+            console.log(
+              `[Download] Stopped tracking download for task: ${task.name}`,
+            );
+          }
         }
       } catch (err: any) {
         console.error(
-          `  [Pool] FATAL Error after retries for ${task.name}:`,
+          `[Pool] 任务 ${task.name} 在所有重试后失败:`,
           err.message,
         );
-        if (progressWindows[wid]) {
-          progressWindows[wid].updateProgress(String(task.id), 0); // Mark as failed
+        // 最终状态: failed
+        updateTaskStateById(wid, taskId, { status: "failed", progress: 0 });
+        // Ensure it's not still being tracked in case of an unexpected error
+        if (activeDownloads.has(taskId)) {
+          activeDownloads.delete(taskId);
         }
-        throw err; // Re-throw to make the pool stop
+        throw err; // 仍然需要抛出错误以停止 Promise.all
       }
     };
     // --- 2. Main execution block ---
@@ -1401,8 +1739,86 @@ function TaskSelectScript(window: CustomWindow): void {
 
       localBlobUrlForCleanup = window.URL.createObjectURL(zipBlob);
 
-      // ... (The code for creating a new window and the download link is unchanged)
-      // ...
+      const newWindow = window.open("", "_blank");
+      if (newWindow) {
+        try {
+          // 1. Get the document of the new window.
+          const newDoc = newWindow.document;
+
+          // 2. Set the title of the new window's document.
+          newDoc.title = "Download File";
+
+          // 3. Create a <style> element and add the CSS rules.
+          const style = newDoc.createElement("style");
+          style.textContent = `
+                body {
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    font-family: sans-serif;
+                    background-color: #f8f9fa;
+                }
+                a {
+                    font-size: 1.5em;
+                    padding: 15px 30px;
+                    border: 1px solid #ccc;
+                    text-decoration: none;
+                    color: #007bff;
+                    background-color: #fff;
+                    border-radius: 5px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    transition: all 0.2s ease-in-out;
+                }
+                a:hover {
+                    background-color: #f0f0f0;
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+                }
+            `;
+          // 4. Append the style to the <head> of the new document.
+          newDoc.head.appendChild(style);
+
+          // 5. Create the <a> element for the download link.
+          const link = newDoc.createElement("a");
+          link.href = localBlobUrlForCleanup;
+          link.textContent = "Download Generated ZIP";
+          // The 'download' attribute is crucial; it tells the browser to download the file.
+          link.download = "downloaded_mp4s.zip";
+
+          // 6. Append the link to the <body> of the new document.
+          newDoc.body.appendChild(link);
+
+          // 7. Focus the new window to bring it to the user's attention.
+          newWindow.focus();
+
+          // The timeout to revoke the blob URL remains the same.
+          setTimeout(() => {
+            if (localBlobUrlForCleanup) {
+              console.log("Revoking Blob URL (timer):", localBlobUrlForCleanup);
+              URL.revokeObjectURL(localBlobUrlForCleanup);
+              localBlobUrlForCleanup = null;
+            }
+          }, 480 * 1000); // 8 minutes
+        } catch (err) {
+          console.error("Error writing to the new window:", err);
+          alert("无法写入新窗口的内容。可能是安全限制。");
+          newWindow.close();
+          if (localBlobUrlForCleanup) {
+            URL.revokeObjectURL(localBlobUrlForCleanup);
+            localBlobUrlForCleanup = null;
+          }
+        }
+      } else {
+        alert(
+          "无法打开新窗口。\n请检查您的浏览器设置，确保允许来自此站点的弹出窗口。",
+        );
+        if (localBlobUrlForCleanup) {
+          URL.revokeObjectURL(localBlobUrlForCleanup);
+          localBlobUrlForCleanup = null;
+        }
+      }
     } catch (error) {
       console.error("下载过程中发生严重错误，已停止:", error);
       alert(
@@ -1419,7 +1835,7 @@ function TaskSelectScript(window: CustomWindow): void {
     if (!taskListContainer || windowState.collapsed) return;
 
     const containerRect = taskListContainer.getBoundingClientRect();
-    // Target only the selectable child task items, which have the necessary data attributes.
+    // Querying for child tasks is correct, as they are the only selectable items.
     const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
       ".task-selector-child-task",
     );
@@ -1429,118 +1845,142 @@ function TaskSelectScript(window: CustomWindow): void {
 
     childTaskItems.forEach((item) => {
       const itemRect = item.getBoundingClientRect();
-      const taskId = item.dataset.taskId; // The task's CID
-      const parentBvId = item.dataset.bv; // The parent video's BV ID
+      const taskId = item.dataset.taskId;
+      const parentBvId = item.dataset.bv;
 
       if (!taskId || !parentBvId) {
-        return; // Skip if essential data is missing
+        return;
       }
 
-      // Check if the item is intersecting with the visible area of the scroll container
       const isVisible =
         itemRect.top < containerRect.bottom &&
         itemRect.bottom > containerRect.top;
 
-      const isCurrentlySelected =
-        selectedTasks[taskId] && !selectedTasks[taskId].marked;
-
-      // If the task is visible but not currently selected, select it.
-      if (isVisible && !isCurrentlySelected) {
-        // Find the complete task data (including name) from the global state
-        const taskData = findChildTaskByIdGlobal(taskId);
-        if (!taskData) {
-          console.warn(
-            `selectVisibleTasks: Could not find task data for visible item with CID ${taskId}`,
-          );
-          return; // Continue to the next item in the loop
-        }
-
-        // 1. Update the UI by changing the element's class
+      // --- KEY CHANGE HERE ---
+      // The condition is now much simpler and clearer.
+      // We select it if it's visible AND not in EITHER of our state Sets.
+      if (
+        isVisible &&
+        !selectedTaskIds.has(taskId) &&
+        !markedTaskIds.has(taskId)
+      ) {
+        // 1. Update the UI. We only need to add 'selected'.
         item.classList.add("selected");
-        item.classList.remove("marked");
 
-        // 2. Update the application's global selection state
-        selectedTasks[taskId] = {
-          ...taskData, // Use the full task data
-          marked: false, // Ensure it's not marked as processed
-        };
+        // 2. Update the application's state. This is now a single, simple operation.
+        selectedTaskIds.add(taskId);
 
         newlySelectedCount++;
         affectedBvIds.add(parentBvId);
       }
     });
 
-    // 3. If any tasks were newly selected, sync the state with the BiliSelect script
+    // 3. Sync state with the BiliSelect script (this logic remains the same).
     if (newlySelectedCount > 0 && window.BiliSelectScriptAPI) {
       affectedBvIds.forEach((bvId) => {
-        // Instruct the BiliSelect script to highlight the corresponding video card
         window.BiliSelectScriptAPI?.selectVideoCardByBv(bvId, true, true);
       });
     }
 
     console.log(
-      `Selected ${newlySelectedCount} visible tasks. Total active selections:`,
-      Object.keys(selectedTasks).filter(
-        (id) => selectedTasks[id] && !selectedTasks[id].marked,
-      ).length,
+      `Selected ${newlySelectedCount} visible tasks. Total active selections: ${selectedTaskIds.size}`,
     );
   }
 
   function deselectVisibleTasks(): void {
     if (!taskListContainer || windowState.collapsed) return;
-    const lr = taskListContainer.getBoundingClientRect();
-    const tis = taskListContainer.querySelectorAll<HTMLDivElement>(
-      ".task-selector-task-item",
+
+    const containerRect = taskListContainer.getBoundingClientRect();
+    const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
+      ".task-selector-child-task",
     );
-    let c = 0; // Count of deselected tasks
-    const bvsToUpdate = new Set<string>(); // Store BV IDs whose selection state needs sync
 
-    tis.forEach((i) => {
-      const ir = i.getBoundingClientRect();
-      const taskId = i.dataset.taskId;
-      if (!taskId) return;
+    let deselectedCount = 0;
+    // We'll gather all parent BVs whose children were deselected.
+    const bvsToUpdate = new Set<string>();
 
-      // We need the BV to sync, even if taskData itself is not strictly needed for deselection
-      const bvId = selectedTasks[taskId].bv || findTaskByIdGlobal(taskId);
+    childTaskItems.forEach((item) => {
+      const itemRect = item.getBoundingClientRect();
+      const taskId = item.dataset.taskId;
+      const parentBvId = item.dataset.bv;
 
-      const isVisible = ir.top < lr.bottom && ir.bottom > lr.top;
-      const isCurrentlySelected =
-        selectedTasks[taskId] && !selectedTasks[taskId].marked;
+      if (!taskId || !parentBvId) return;
 
-      if (isVisible && isCurrentlySelected) {
-        i.classList.remove("selected", "marked"); // Remove both, just in case
-        delete selectedTasks[taskId];
-        c++;
-        if (bvId) {
-          // Only add if we have a BV ID
-          bvsToUpdate.add(bvId);
-        }
+      const isVisible =
+        itemRect.top < containerRect.bottom &&
+        itemRect.bottom > containerRect.top;
+
+      // --- KEY CHANGE HERE ---
+      // The condition to act is simple: Is the item visible AND is its ID in our selection Set?
+      if (isVisible && selectedTaskIds.has(taskId)) {
+        // 1. Update the application state by removing the ID.
+        selectedTaskIds.delete(taskId);
+
+        // 2. Update the UI by removing the 'selected' class.
+        item.classList.remove("selected");
+
+        // 3. Track our changes for the final summary and sync.
+        deselectedCount++;
+        bvsToUpdate.add(parentBvId);
       }
     });
 
-    if (c > 0 && window.BiliSelectScriptAPI) {
+    // --- SYNC LOGIC ---
+    // If we actually deselected anything, we need to check if the parent video
+    // cards on the main page should also be deselected.
+    if (deselectedCount > 0 && window.BiliSelectScriptAPI) {
       bvsToUpdate.forEach((bvId) => {
-        // Check if any other task for this BV is still selected in TaskManager
+        // Check if ANY OTHER task for this BV is still selected.
         const anyOtherTaskForBvIsSelected =
           TaskSelectorManager.isAnyTaskSelectedForBv(bvId);
-        // If no other tasks for this BV are selected, then deselect the video card
+
+        // Only deselect the card if NO tasks for this BV remain in the selection.
         if (!anyOtherTaskForBvIsSelected) {
           window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, false, true);
         }
-        // If other tasks for this BV are still selected, the video card should remain selected.
       });
     }
 
     console.log(
-      `Deselected ${c} visible tasks. Total active:`,
-      Object.keys(selectedTasks).filter(
-        (id) => selectedTasks[id] && !selectedTasks[id].marked,
-      ).length,
+      `Deselected ${deselectedCount} visible tasks. Total active selections: ${selectedTaskIds.size}`,
     );
   }
+  function deselectAllTasks(): void {
+    // If there's nothing selected, there's nothing to do.
+    if (selectedTaskIds.size === 0) {
+      console.log("Deselect All: No tasks were selected.");
+      return;
+    }
 
+    const bvsToUpdate = new Set<string>();
+
+    // 1. Efficiently gather all parent BV IDs before clearing the selection.
+    // This leverages our new instant O(1) taskMap lookup.
+    for (const taskId of selectedTaskIds) {
+      const taskData = taskMap.get(taskId); // Fast lookup
+      if (taskData) {
+        bvsToUpdate.add(taskData.bv);
+      }
+    }
+
+    // 2. The core state change: clear the entire selection Set in one go.
+    const deselectedCount = selectedTaskIds.size;
+    selectedTaskIds.clear();
+
+    // 3. Trigger a full re-render to remove all 'selected' styles from the UI.
+    renderTasksForCurrentTab(true);
+
+    // 4. Sync the changes with the BiliSelectScript on the main page.
+    if (window.BiliSelectScriptAPI) {
+      bvsToUpdate.forEach((bvId) => {
+        // Since we are deselecting ALL, the `shouldSelect` parameter is always false.
+        window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, false, true);
+      });
+    }
+
+    console.log(`Deselected ${deselectedCount} tasks globally.`);
+  }
   function selectAllTasksInTab(): void {
-    // Selects all *children* tasks in the current tab
     if (!currentTabId || !allTasksData[currentTabId]) return;
     const parentTasksInCurrentTab = allTasksData[currentTabId].tasks;
     const bvsToUpdate = new Set<string>();
@@ -1548,72 +1988,35 @@ function TaskSelectScript(window: CustomWindow): void {
 
     parentTasksInCurrentTab.forEach((pt) => {
       pt.children.forEach((child) => {
-        if (!selectedTasks[child.id] || selectedTasks[child.id].marked) {
-          selectedTasks[child.id] = { ...child, marked: false };
+        // Add to set if it's not already selected or marked
+        if (!selectedTaskIds.has(child.id) && !markedTaskIds.has(child.id)) {
+          selectedTaskIds.add(child.id);
           changed = true;
         }
       });
       if (pt.children.length > 0) bvsToUpdate.add(pt.bv);
     });
 
-    if (changed && window.BiliSelectScriptAPI) {
-      bvsToUpdate.forEach((bvId) => {
-        window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, true, true);
-      });
-    }
-    if (changed) console.log(`Selected all sub-tasks in tab ${currentTabId}.`);
-    renderTasksForCurrentTab(true); // Full re-render to update UI
-  }
-
-  function deselectAllTasks(): void {
-    // Deselects all non-marked *children* tasks globally
-    const bvsToUpdate = new Set<string>();
-
-    // Collect BVs of tasks about to be deselected
-    Object.values(selectedTasks).forEach((selTask) => {
-      if (!selTask.marked && selTask.bv) {
-        bvsToUpdate.add(selTask.bv);
+    if (changed) {
+      renderTasksForCurrentTab(true); // Re-render to update UI
+      if (window.BiliSelectScriptAPI) {
+        bvsToUpdate.forEach((bvId) => {
+          window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, true, true);
+        });
       }
-    });
-
-    // Rebuild selectedTasks to only contain marked items
-    const newSelectedTasks: Record<string, SelectedTask> = {};
-    Object.values(selectedTasks).forEach((selTask) => {
-      if (selTask.marked) {
-        newSelectedTasks[selTask.id] = selTask;
-      }
-    });
-    selectedTasks = newSelectedTasks;
-
-    // Update UI (renderTasksForCurrentTab will handle this better)
-    // taskListContainer?.querySelectorAll(".task-selector-child-task.selected").forEach(i => {
-    //     i.classList.remove("selected");
-    // });
-    renderTasksForCurrentTab(true); // Re-render needed for global change
-
-    if (window.BiliSelectScriptAPI) {
-      bvsToUpdate.forEach((bvId) => {
-        // Since we deselected all non-marked, check if this BV still has any selected (should be false)
-        const anyStillSelected =
-          TaskSelectorManager.isAnyTaskSelectedForBv(bvId);
-        if (!anyStillSelected) {
-          // Should always be true here unless logic error
-          window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, false, true);
-        }
-      });
+      console.log(`Selected all available sub-tasks in tab ${currentTabId}.`);
     }
-    console.log("Deselected all non-marked sub-tasks globally.");
   }
-
   // --- Progress Window Functions ---
   function createProgressWindow(tasksForWindow: SelectedTask[]): string {
     progressWindowCounter++;
     const windowId = `progress-window-${progressWindowCounter}`;
 
     const preparedTasks: ProgressTaskItem[] = tasksForWindow.map((t) => ({
-      ...t, // Spread the SelectedTask properties
+      ...t,
       progress: 0,
       windowId: windowId,
+      status: "pending", // 设置初始状态
     }));
 
     const state: ProgressWindowState = {
@@ -1663,34 +2066,49 @@ function TaskSelectScript(window: CustomWindow): void {
     pwC.append(pwH, pwL, pwR);
     document.body.appendChild(pwC);
 
+    const cleanupFunctions: (() => void)[] = [];
+
+    // Create drag handler and store its cleanup function
+    const destroyDragHandler = createDragHandler({
+      triggerElement: pwH,
+      movableElement: pwC,
+      state: state, // Pass the window's specific state object
+    });
+    cleanupFunctions.push(destroyDragHandler);
+
+    // Create resize handler and store its cleanup function
+    const destroyResizeHandler = createResizeHandler({
+      resizeHandleElement: pwR,
+      resizableElement: pwC,
+      state: state, // Pass the window's specific state object
+      onResize: () => {
+        if (progressWindows[windowId]?.state)
+          progressWindows[windowId].state.needsRender = true;
+        scheduleTick();
+      },
+      onResizeEnd: () => {
+        if (progressWindows[windowId]?.state) {
+          progressWindows[windowId].state.needsRender = true;
+          progressWindows[windowId].state.lastRenderedScrollTop = -1;
+        }
+        scheduleTick();
+      },
+    });
+    cleanupFunctions.push(destroyResizeHandler);
+    // The progressWindows object is now much simpler
     progressWindows[windowId] = {
       element: pwC,
       listElement: pwL,
       closeButton: pwX,
-      tasks: preparedTasks, // Store the prepared tasks here
+      tasks: preparedTasks,
       state: state,
       checkCompletion: () => checkProgressCompletion(windowId),
       updateProgress: (tid, p) => updateTaskProgressById(windowId, tid, p),
       renderItems: (f = false) => renderProgressItems(windowId, f),
       handleScroll: () => handleProgressScroll(windowId),
-      handleMouseDownDrag: (event) =>
-        handleProgressMouseDownDrag(event, windowId),
-      handleMouseMoveDrag: null,
-      handleMouseUpDrag: null,
-      handleMouseDownResize: (event) =>
-        handleProgressMouseDownResize(event, windowId),
-      handleMouseMoveResize: null,
-      handleMouseUpResize: null,
+      cleanupFunctions: cleanupFunctions, // Store the array of cleanup functions
     };
 
-    pwH.addEventListener(
-      "mousedown",
-      progressWindows[windowId].handleMouseDownDrag as EventListener,
-    );
-    pwR.addEventListener(
-      "mousedown",
-      progressWindows[windowId].handleMouseDownResize as EventListener,
-    );
     pwL.addEventListener("scroll", progressWindows[windowId].handleScroll, {
       passive: true,
     });
@@ -1700,67 +2118,105 @@ function TaskSelectScript(window: CustomWindow): void {
     return windowId;
   }
 
+  // Replace the entire old function with this new one
+
   function closeProgressWindow(windowId: string): void {
     const pw = progressWindows[windowId];
     if (!pw?.element) return;
 
-    const headerEl = pw.element.querySelector<HTMLDivElement>(
-      ".task-progress-header",
-    );
-    headerEl?.removeEventListener(
-      "mousedown",
-      pw.handleMouseDownDrag as EventListener,
-    );
+    // 1. Execute all stored cleanup functions.
+    // This will remove the 'mousedown' listeners for drag and resize.
+    pw.cleanupFunctions.forEach((cleanup) => cleanup());
 
-    const resizerEl = pw.element.querySelector<HTMLDivElement>(
-      ".task-progress-resizer",
-    );
-    resizerEl?.removeEventListener(
-      "mousedown",
-      pw.handleMouseDownResize as EventListener,
-    );
-
+    // 2. Remove any other listeners attached directly.
     pw.listElement?.removeEventListener("scroll", pw.handleScroll);
 
-    if (pw.handleMouseMoveDrag)
-      document.removeEventListener("mousemove", pw.handleMouseMoveDrag);
-    if (pw.handleMouseUpDrag)
-      document.removeEventListener("mouseup", pw.handleMouseUpDrag);
-    if (pw.handleMouseMoveResize)
-      document.removeEventListener("mousemove", pw.handleMouseMoveResize);
-    if (pw.handleMouseUpResize)
-      document.removeEventListener("mouseup", pw.handleMouseUpResize);
-
+    // 3. Remove the element from the DOM.
     pw.element.remove();
+
+    // 4. Delete the window's data from our state.
     delete progressWindows[windowId];
   }
-
-  function updateTaskProgressById(wId: string, tId: string, p: number): void {
-    const pw = progressWindows[wId];
+  // 新的、更强大的内部更新函数
+  function updateTaskStateById(
+    windowId: string,
+    taskId: string,
+    newState: Partial<Pick<ProgressTaskItem, "progress" | "status">>,
+  ): void {
+    const pw = progressWindows[windowId];
     if (!pw) return;
-    const taskItem = pw.tasks.find((t) => t.id === tId);
+
+    const taskItem = pw.tasks.find((t) => t.id === taskId);
     if (taskItem) {
-      taskItem.progress = Math.max(0, Math.min(100, p));
+      // 更新状态
+      if (newState.progress !== undefined) {
+        taskItem.progress = Math.max(0, Math.min(100, newState.progress));
+      }
+      if (newState.status !== undefined) {
+        taskItem.status = newState.status;
+      }
+
+      // 更新 DOM
       const itemNode = pw.listElement?.querySelector<HTMLDivElement>(
-        `.task-progress-item[data-task-id="${tId}"]`,
+        `.task-progress-item[data-task-id="${taskId}"]`,
       );
       if (itemNode) {
         const progressBar =
           itemNode.querySelector<HTMLDivElement>(".task-progress-bar");
         if (progressBar) {
           progressBar.style.width = `${taskItem.progress}%`;
-          progressBar.classList.toggle("completed", taskItem.progress === 100);
+          // 移除所有旧的状态类
+          progressBar.className = "task-progress-bar";
+          // 添加当前状态的类
+          progressBar.classList.add(`status-${taskItem.status}`);
+        }
+
+        // (可选) 更新状态文本
+        let statusTextElem = itemNode.querySelector<HTMLSpanElement>(
+          ".task-progress-item-status-text",
+        );
+        if (
+          taskItem.status !== "downloading" &&
+          taskItem.status !== "pending" &&
+          taskItem.status !== "completed"
+        ) {
+          if (!statusTextElem) {
+            statusTextElem = document.createElement("span");
+            statusTextElem.className = "task-progress-item-status-text";
+            const nameElem = itemNode.querySelector(".task-progress-item-name");
+            nameElem?.appendChild(statusTextElem);
+          }
+          let text = "";
+          if (taskItem.status === "retrying") text = " (重试中...)";
+          if (taskItem.status === "failed") text = " (下载失败)";
+          // ADD THIS LINE
+          if (taskItem.status === "restarted") text = " (已在新批次中重启)";
+          statusTextElem.textContent = text;
+          statusTextElem.textContent = text;
+        } else if (statusTextElem) {
+          statusTextElem.textContent = ""; // 清除文本
         }
       }
-      pw.checkCompletion();
+
+      // 检查整体完成情况
+      if (newState.status === "completed" || newState.status === "failed") {
+        pw.checkCompletion();
+      }
     }
+  }
+
+  function updateTaskProgressById(wId: string, tId: string, p: number): void {
+    updateTaskStateById(wId, tId, { progress: p });
   }
 
   function checkProgressCompletion(wId: string): void {
     const pw = progressWindows[wId];
     if (!pw?.closeButton) return;
-    const allCompleted = pw.tasks.every((t) => t.progress === 100);
-    pw.closeButton.classList.toggle("visible", allCompleted);
+    // 当所有任务都完成或失败时，显示关闭按钮
+    const allDone = pw.tasks.every(
+      (t) => t.status === "completed" || t.status === "failed",
+    );
+    pw.closeButton.classList.toggle("visible", allDone);
   }
 
   function renderProgressItems(
@@ -1862,257 +2318,7 @@ function TaskSelectScript(window: CustomWindow): void {
     scheduleTick();
   }
 
-  let currentProgressDrag: {
-    windowId: string | null;
-    offsetX: number;
-    offsetY: number;
-    moveHandler: ((event: MouseEvent) => void) | null;
-    upHandler: ((event: MouseEvent) => void) | null;
-  } = {
-    windowId: null,
-    offsetX: 0,
-    offsetY: 0,
-    moveHandler: null,
-    upHandler: null,
-  };
-
-  function handleProgressMouseDownDrag(
-    event: MouseEvent,
-    windowId: string,
-  ): void {
-    event.stopPropagation();
-    const pwData = progressWindows[windowId];
-    if (
-      !pwData?.element ||
-      (event.target as HTMLElement).closest(
-        ".task-progress-close-btn, .task-progress-resizer",
-      )
-    )
-      return;
-
-    currentProgressDrag.windowId = windowId;
-    const rect = pwData.element.getBoundingClientRect();
-    currentProgressDrag.offsetX = event.clientX - rect.left;
-    currentProgressDrag.offsetY = event.clientY - rect.top;
-
-    currentProgressDrag.moveHandler = (event: MouseEvent) =>
-      handleProgressMouseMoveDrag(event);
-    currentProgressDrag.upHandler = (event: MouseEvent) =>
-      handleProgressMouseUpDrag(event);
-
-    // Store handlers on the specific progress window data for reliable removal
-    pwData.handleMouseMoveDrag = currentProgressDrag.moveHandler;
-    pwData.handleMouseUpDrag = currentProgressDrag.upHandler;
-
-    pwData.element.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "grabbing"; // Apply to body for wider capture
-
-    document.addEventListener("mousemove", currentProgressDrag.moveHandler, {
-      passive: false,
-    });
-    document.addEventListener("mouseup", currentProgressDrag.upHandler);
-  }
-
-  function handleProgressMouseMoveDrag(event: MouseEvent): void {
-    if (!currentProgressDrag.windowId) return;
-    event.preventDefault();
-    const pwData = progressWindows[currentProgressDrag.windowId];
-    if (!pwData?.element) return;
-
-    let newTop = event.clientY - currentProgressDrag.offsetY;
-    let newLeft = event.clientX - currentProgressDrag.offsetX;
-    const el = pwData.element;
-
-    newTop = Math.max(
-      0,
-      Math.min(newTop, window.innerHeight - el.offsetHeight),
-    );
-    newLeft = Math.max(
-      0,
-      Math.min(newLeft, window.innerWidth - el.offsetWidth),
-    );
-
-    el.style.top = `${newTop}px`;
-    el.style.left = `${newLeft}px`;
-  }
-
-  function handleProgressMouseUpDrag(event: MouseEvent): void {
-    void event;
-    if (!currentProgressDrag.windowId) return;
-    const WID = currentProgressDrag.windowId; // Capture before reset
-    const pwData = progressWindows[WID];
-
-    if (pwData?.element) {
-      pwData.element.style.cursor = ""; // Reset element cursor
-      pwData.element
-        .querySelector<HTMLDivElement>(".task-progress-header")
-        ?.style.setProperty("cursor", "grab");
-      pwData.state.top = pwData.element.style.top;
-      pwData.state.left = pwData.element.style.left;
-
-      // Remove specific handlers stored on pwData
-      if (pwData.handleMouseMoveDrag)
-        document.removeEventListener("mousemove", pwData.handleMouseMoveDrag);
-      if (pwData.handleMouseUpDrag)
-        document.removeEventListener("mouseup", pwData.handleMouseUpDrag);
-      pwData.handleMouseMoveDrag = null;
-      pwData.handleMouseUpDrag = null;
-    } else {
-      // Fallback if pwData somehow gone, remove global currentProgressDrag handlers
-      if (currentProgressDrag.moveHandler)
-        document.removeEventListener(
-          "mousemove",
-          currentProgressDrag.moveHandler,
-        );
-      if (currentProgressDrag.upHandler)
-        document.removeEventListener("mouseup", currentProgressDrag.upHandler);
-    }
-
-    document.body.style.userSelect = "";
-    document.body.style.cursor = ""; // Reset body cursor
-
-    currentProgressDrag = {
-      windowId: null,
-      offsetX: 0,
-      offsetY: 0,
-      moveHandler: null,
-      upHandler: null,
-    };
-  }
-
-  let currentProgressResize: {
-    windowId: string | null;
-    startX: number;
-    startY: number;
-    startW: number;
-    startH: number;
-    moveHandler: ((event: MouseEvent) => void) | null;
-    upHandler: ((event: MouseEvent) => void) | null;
-  } = {
-    windowId: null,
-    startX: 0,
-    startY: 0,
-    startW: 0,
-    startH: 0,
-    moveHandler: null,
-    upHandler: null,
-  };
-
-  function handleProgressMouseDownResize(
-    event: MouseEvent,
-    windowId: string,
-  ): void {
-    event.stopPropagation();
-    event.preventDefault();
-    const pwData = progressWindows[windowId];
-    if (!pwData?.element) return;
-
-    currentProgressResize.windowId = windowId;
-    const rect = pwData.element.getBoundingClientRect();
-    currentProgressResize.startX = event.clientX;
-    currentProgressResize.startY = event.clientY;
-    currentProgressResize.startW = rect.width;
-    currentProgressResize.startH = rect.height;
-
-    currentProgressResize.moveHandler = (event: MouseEvent) =>
-      handleProgressMouseMoveResize(event);
-    currentProgressResize.upHandler = (event: MouseEvent) =>
-      handleProgressMouseUpResize(event);
-
-    pwData.handleMouseMoveResize = currentProgressResize.moveHandler;
-    pwData.handleMouseUpResize = currentProgressResize.upHandler;
-
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "nwse-resize";
-
-    document.addEventListener("mousemove", currentProgressResize.moveHandler, {
-      passive: false,
-    });
-    document.addEventListener("mouseup", currentProgressResize.upHandler);
-  }
-
-  function handleProgressMouseMoveResize(event: MouseEvent): void {
-    if (!currentProgressResize.windowId) return;
-    event.preventDefault();
-    const pwData = progressWindows[currentProgressResize.windowId];
-    if (!pwData?.element) return;
-
-    const dx = event.clientX - currentProgressResize.startX;
-    const dy = event.clientY - currentProgressResize.startY;
-    let newWidth = currentProgressResize.startW + dx;
-    let newHeight = currentProgressResize.startH + dy;
-
-    const computedStyle = getComputedStyle(pwData.element);
-    const minWidth = parseInt(computedStyle.minWidth) || 150;
-    const minHeight = parseInt(computedStyle.minHeight) || 80;
-
-    newWidth = Math.max(minWidth, newWidth);
-    newHeight = Math.max(minHeight, newHeight);
-
-    pwData.element.style.width = `${newWidth}px`;
-    pwData.element.style.height = `${newHeight}px`;
-
-    if (pwData.state) pwData.state.needsRender = true;
-    scheduleTick();
-  }
-
-  function handleProgressMouseUpResize(event: MouseEvent): void {
-    void event;
-    if (!currentProgressResize.windowId) return;
-    const WID = currentProgressResize.windowId;
-    const pwData = progressWindows[WID];
-
-    if (pwData?.element) {
-      pwData.state.width = pwData.element.style.width;
-      pwData.state.height = pwData.element.style.height;
-      if (pwData.state) {
-        pwData.state.needsRender = true;
-        pwData.state.lastRenderedScrollTop = -1; // Force full re-render of content
-      }
-      scheduleTick();
-
-      if (pwData.handleMouseMoveResize)
-        document.removeEventListener("mousemove", pwData.handleMouseMoveResize);
-      if (pwData.handleMouseUpResize)
-        document.removeEventListener("mouseup", pwData.handleMouseUpResize);
-      pwData.handleMouseMoveResize = null;
-      pwData.handleMouseUpResize = null;
-    } else {
-      if (currentProgressResize.moveHandler)
-        document.removeEventListener(
-          "mousemove",
-          currentProgressResize.moveHandler,
-        );
-      if (currentProgressResize.upHandler)
-        document.removeEventListener(
-          "mouseup",
-          currentProgressResize.upHandler,
-        );
-    }
-
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-
-    currentProgressResize = {
-      windowId: null,
-      startX: 0,
-      startY: 0,
-      startW: 0,
-      startH: 0,
-      moveHandler: null,
-      upHandler: null,
-    };
-  }
-
   // --- Helper Functions ---
-  function findTaskByIdGlobal(taskId: string): string | null {
-    for (const tabId in allTasksData) {
-      const task = allTasksData[tabId].tasks.find((t) => t.bv === taskId);
-      if (task) return task.bv;
-    }
-    return null;
-  }
 
   // --- Initialization ---
   function init(): void {
@@ -2136,11 +2342,11 @@ function TaskSelectScript(window: CustomWindow): void {
     collapseIndicator.className = "task-selector-collapse-indicator";
     // textContent set later based on collapsed state
     header.appendChild(collapseIndicator);
-
-    header.addEventListener(
-      "mousedown",
-      handleMouseDownHeader as EventListener,
-    );
+    createDragHandler({
+      triggerElement: header,
+      movableElement: container,
+      state: windowState,
+    });
     collapseIndicator.addEventListener(
       "click",
       toggleCollapse as EventListener,
@@ -2201,6 +2407,11 @@ function TaskSelectScript(window: CustomWindow): void {
       handleMouseDownTaskList as EventListener,
     );
 
+    // NEW: Add the spacer element for virtualization
+    const spacer = document.createElement("div");
+    spacer.className = "virtual-scroll-spacer";
+    taskListContainer.appendChild(spacer);
+
     tabsContainer = document.createElement("div");
     tabsContainer.className = "task-selector-tabs-container";
     tabsContainer.addEventListener("scroll", debouncedTabsScrollSave, {
@@ -2209,7 +2420,24 @@ function TaskSelectScript(window: CustomWindow): void {
 
     const rsz = document.createElement("div");
     rsz.className = "task-selector-resizer";
-    rsz.addEventListener("mousedown", handleMouseDownResize as EventListener);
+
+    createResizeHandler({
+      resizeHandleElement: rsz,
+      resizableElement: container,
+      state: windowState,
+      onResize: () => {
+        if (currentTabId && tabStates[currentTabId])
+          tabStates[currentTabId].needsRender = true;
+        scheduleTick();
+      },
+      onResizeEnd: () => {
+        if (currentTabId && tabStates[currentTabId]) {
+          tabStates[currentTabId].needsRender = true;
+          tabStates[currentTabId].lastRenderedScrollTop = -1; // Force full re-render
+        }
+        scheduleTick();
+      },
+    });
 
     cW.append(taskListContainer, tabsContainer);
     body.append(buttonsContainer, cW);
@@ -2236,14 +2464,26 @@ function TaskSelectScript(window: CustomWindow): void {
     if (!windowState.collapsed && currentTabId) {
       renderTasksForCurrentTab(true); // Force render if initially expanded and tab exists
     }
+    // Register network event listeners and add their cleanup to the global array
+    const onlineHandler = handleConnectionRestored as EventListener;
+    const offlineHandler = handleConnectionLost as EventListener;
+    window.addEventListener("online", onlineHandler);
+    window.addEventListener("offline", offlineHandler);
+    globalCleanupFunctions.push(() =>
+      window.removeEventListener("online", onlineHandler),
+    );
+    globalCleanupFunctions.push(() =>
+      window.removeEventListener("offline", offlineHandler),
+    );
+
     console.log("Task Selector Initialized.");
   }
 
   // --- Public API ---
   const TaskSelectorManager: TaskSelectorManagerAPI = {
     addTaskData: (
-      tId: string, // tabId
-      tN: string, // tabName
+      tabId: string, // tabId
+      tabName: string, // tabName
       parentTaskInputs: {
         videoTitle: string;
         bvId: string;
@@ -2251,16 +2491,17 @@ function TaskSelectScript(window: CustomWindow): void {
       }[],
       autoSelectNewChildren: boolean = false,
     ) => {
-      if (!tId || !tN || !Array.isArray(parentTaskInputs)) {
+      if (!tabId || !tabName || !Array.isArray(parentTaskInputs)) {
         console.error("Invalid addTaskData args");
         return;
       }
-      const sId = String(tId);
+      const sId = String(tabId);
       let needsReRenderCurrentTab = false;
       let tabCreated = false;
 
+      // Create tab data structure if it doesn't exist
       if (!allTasksData[sId]) {
-        allTasksData[sId] = { name: tN, tasks: [] };
+        allTasksData[sId] = { name: tabName, tasks: [] };
         tabStates[sId] = {
           taskScrollTop: 0,
           tabScrollLeft: 0,
@@ -2272,64 +2513,74 @@ function TaskSelectScript(window: CustomWindow): void {
       }
 
       const tabParentTasks = allTasksData[sId].tasks;
+
       parentTaskInputs.forEach((videoInput) => {
+        // Check if this parent video (BV) already exists in this tab
         const existingParentTask = tabParentTasks.find(
           (pt) => pt.bv === videoInput.bvId,
         );
 
         if (existingParentTask) {
-          // Parent task (video) already exists. Maybe update children if needed, or ignore.
-          // For now, let's assume if parent exists, children are also up-to-date.
-          // If autoSelectNewChildren is true, we might need to select its children.
+          // Parent task already exists. We won't add it again.
+          // We'll still honor auto-selection for its children if requested.
           if (autoSelectNewChildren) {
             existingParentTask.children.forEach((childTask) => {
-              if (
-                !selectedTasks[childTask.id] ||
-                selectedTasks[childTask.id].marked
-              ) {
-                selectedTasks[childTask.id] = { ...childTask, marked: false };
+              if (!markedTaskIds.has(childTask.id)) {
+                // Only select if not marked
+                selectedTaskIds.add(childTask.id);
+                needsReRenderCurrentTab = true;
               }
             });
-            needsReRenderCurrentTab = true;
           }
-        } else {
-          // New parent task (video)
-          const children: Task[] = videoInput.pages.map((page) => ({
-            id: String(page.cid), // This is the actual task ID for selection
-            name: String(page.part),
-            bv: videoInput.bvId,
-          }));
+          return; // Skip to the next videoInput
+        }
 
-          if (children.length === 0) {
-            // Should not happen if pages are fetched correctly
-            console.warn(
-              `No pages found for BV ${videoInput.bvId}, video title: ${videoInput.videoTitle}. Skipping.`,
-            );
-            return;
-          }
+        // --- This is a NEW parent task, process it ---
 
-          const newParentTask: ParentTask = {
-            name: videoInput.videoTitle,
-            bv: videoInput.bvId,
-            children: children,
-            isExpanded: false, // Default to collapsed
-            MediaId: tId,
-          };
-          tabParentTasks.push(newParentTask);
-          needsReRenderCurrentTab = true;
+        // 1. Create the child task data objects
+        const children: Task[] = videoInput.pages.map((page) => ({
+          id: String(page.cid),
+          name: String(page.part),
+          bv: videoInput.bvId,
+        }));
 
-          if (autoSelectNewChildren) {
-            newParentTask.children.forEach((childTask) => {
-              selectedTasks[childTask.id] = { ...childTask, marked: false };
-            });
-            console.log(
-              `TaskSelectorManager: Auto-selected all children for new video BV ${videoInput.bvId}`,
-            );
-          }
+        if (children.length === 0) {
+          console.warn(
+            `No pages found for BV ${videoInput.bvId}, title: ${videoInput.videoTitle}.`,
+          );
+          return;
+        }
+
+        // 2. Populate our global taskMap for fast lookups
+        children.forEach((child) => {
+          taskMap.set(child.id, child);
+        });
+
+        // 3. Create the new parent task object
+        const newParentTask: ParentTask = {
+          name: videoInput.videoTitle,
+          bv: videoInput.bvId,
+          children: children,
+          isExpanded: false, // Default to collapsed
+          MediaId: tabId,
+        };
+        tabParentTasks.push(newParentTask);
+        needsReRenderCurrentTab = true;
+
+        // 4. Handle auto-selection with our new Set
+        if (autoSelectNewChildren) {
+          newParentTask.children.forEach((childTask) => {
+            selectedTaskIds.add(childTask.id);
+          });
+          console.log(
+            `TaskSelectorManager: Auto-selected all children for new video BV ${videoInput.bvId}`,
+          );
         }
       });
 
+      // --- UI Update Logic ---
       if (tabCreated && tabsContainer) renderTabs();
+
       if (
         needsReRenderCurrentTab &&
         sId === currentTabId &&
@@ -2349,52 +2600,56 @@ function TaskSelectScript(window: CustomWindow): void {
     },
 
     getSelectedTaskIds: () => {
-      return Object.keys(selectedTasks).filter(
-        (id) => selectedTasks[id] && !selectedTasks[id].marked,
-      );
+      // Simply convert the Set to an array.
+      return Array.from(selectedTaskIds);
+    },
+
+    // In isTaskSelected
+    isTaskSelected: (taskId: string /* cid */): boolean => {
+      // Direct, O(1) lookup.
+      return selectedTaskIds.has(taskId);
+    },
+
+    // In isAnyTaskSelectedForBv
+    isAnyTaskSelectedForBv: (bvId: string): boolean => {
+      if (!bvId) return false;
+      // This is the one place where we need to look up task data.
+      // It highlights the need for the taskMap optimization.
+      for (const taskId of selectedTaskIds) {
+        const taskData = findChildTaskByIdGlobal(taskId); // Assumes findChildTaskByIdGlobal exists and is efficient
+        if (taskData && taskData.bv === bvId) {
+          return true; // Found a match
+        }
+      }
+      return false;
     },
 
     destroy: () => {
       console.log("Destroying Task Selector...");
       if (!container) return;
 
-      header?.removeEventListener(
-        "mousedown",
-        handleMouseDownHeader as EventListener,
-      );
-      collapseIndicator?.removeEventListener(
-        "click",
-        toggleCollapse as EventListener,
-      );
-      taskListContainer?.removeEventListener("scroll", handleTaskListScroll);
-      taskListContainer?.removeEventListener(
-        "mousedown",
-        handleMouseDownTaskList as EventListener,
-      );
-      tabsContainer?.removeEventListener("scroll", debouncedTabsScrollSave);
-      container
-        .querySelector<HTMLDivElement>(".task-selector-resizer")
-        ?.removeEventListener(
-          "mousedown",
-          handleMouseDownResize as EventListener,
-        );
+      // 1. Execute all registered cleanup functions in one go.
+      // This removes every single event listener we added.
+      globalCleanupFunctions.forEach((cleanup) => cleanup());
+      globalCleanupFunctions.length = 0; // Clear the array for any potential re-initialization.
 
-      buttonsContainer?.querySelectorAll("button").forEach((b) => {
-        // Simple way to remove all listeners: replace node
-        b.replaceWith(b.cloneNode(true));
-      });
+      // 2. Close all child windows (this already uses the robust cleanup pattern).
+      Object.keys(progressWindows).forEach(closeProgressWindow);
 
-      Object.keys(progressWindows).forEach(closeProgressWindow); // Closes and cleans listeners for progress windows
-
+      // 3. Remove the main DOM elements.
       container.remove();
       document.getElementById("task-selector-styles")?.remove();
 
-      // Reset state variables
+      // 4. Reset all state variables to their initial values.
       allTasksData = {};
-      selectedTasks = {};
+      selectedTaskIds = new Set<string>();
+      markedTaskIds = new Set<string>();
+      taskMap = new Map<string, Task>();
+      activeDownloads.clear();
       currentTabId = null;
       tabStates = {};
       windowState = {
+        // Reset to default
         collapsed: true,
         top: "20px",
         left: "20px",
@@ -2403,16 +2658,12 @@ function TaskSelectScript(window: CustomWindow): void {
       };
       progressWindows = {};
       progressWindowCounter = 0;
-      isDragging = false;
-      isResizing = false;
       isSelectingBox = false;
-      dragOffset = { x: 0, y: 0 };
-      resizeHandle = null;
       selectionBoxStart = { x: 0, y: 0 };
-      selectionBoxElement = null;
-      initialSelectedInTabForBoxOp = {};
+      initialSelectedInTabForBoxOp = new Set();
       tickScheduled = false;
 
+      // 5. Nullify DOM element references to help garbage collection.
       container = null;
       header = null;
       body = null;
@@ -2420,79 +2671,84 @@ function TaskSelectScript(window: CustomWindow): void {
       tabsContainer = null;
       buttonsContainer = null;
       collapseIndicator = null;
-      // selectionBoxElement already nulled
+      selectionBoxElement = null;
 
+      // 6. Remove the API from the window object.
       delete window.TaskSelectorManager;
       console.log("Task Selector destroyed.");
     },
     selectTasksByBv: (bvId: string, shouldSelect: boolean) => {
       if (!bvId) return;
+
       console.log(
         `TaskSelectorManager.selectTasksByBv called for BV: ${bvId}, select: ${shouldSelect}`,
       );
+
       let changed = false;
+      let affectsCurrentTab = false;
+
+      // Loop through all tabs to find the parent task(s) associated with the bvId.
+      // This is robust in case the same video appears in multiple lists (tabs).
       for (const tabId in allTasksData) {
         const parentTask = allTasksData[tabId].tasks.find(
           (pt) => pt.bv === bvId,
         );
+
         if (parentTask) {
+          // We found a matching parent task. Now process its children.
           parentTask.children.forEach((child) => {
-            const currentSelectedState =
-              selectedTasks[child.id] && !selectedTasks[child.id].marked;
-            if (shouldSelect && !currentSelectedState) {
-              selectedTasks[child.id] = { ...child, marked: false };
-              changed = true;
-            } else if (!shouldSelect && currentSelectedState) {
-              delete selectedTasks[child.id];
-              changed = true;
+            const childId = child.id;
+
+            if (shouldSelect) {
+              // --- SELECT LOGIC ---
+              // Only select if it's not already selected AND not already marked.
+              if (
+                !selectedTaskIds.has(childId) &&
+                !markedTaskIds.has(childId)
+              ) {
+                selectedTaskIds.add(childId);
+                changed = true;
+              }
+            } else {
+              // --- DESELECT LOGIC ---
+              // Only deselect if it's currently in the selection set.
+              if (selectedTaskIds.has(childId)) {
+                selectedTaskIds.delete(childId);
+                changed = true;
+              }
             }
           });
-          // No need to break, a BV might appear in multiple tabs if data is structured that way,
-          // though typically a BV is unique to one favorite list (tab).
+
+          // If a change occurred, check if it affects the currently visible tab.
+          if (changed && tabId === currentTabId) {
+            affectsCurrentTab = true;
+          }
         }
       }
 
-      if (changed) {
+      // --- UI UPDATE LOGIC ---
+      // If any change happened and it affects the current tab, trigger a re-render.
+      if (changed && affectsCurrentTab) {
         console.log(
-          `TaskSelectorManager: Children tasks for BV ${bvId} selection state changed to ${shouldSelect}. Re-rendering.`,
+          `TaskSelectorManager: Re-rendering current tab after selection change for BV ${bvId}.`,
         );
-        // Force re-render if current tab is affected
+
         if (
-          currentTabId &&
-          allTasksData[currentTabId]?.tasks.some((pt) => pt.bv === bvId) &&
+          tabStates[currentTabId!] &&
           !windowState.collapsed &&
           taskListContainer
         ) {
-          if (tabStates[currentTabId]) {
-            tabStates[currentTabId].needsRender = true;
-            tabStates[currentTabId].lastRenderedScrollTop = -1;
-          }
+          tabStates[currentTabId!].needsRender = true;
+          // Force a full re-render to guarantee all styles are updated correctly.
+          tabStates[currentTabId!].lastRenderedScrollTop = -1;
           scheduleTick();
         }
+      } else if (changed) {
+        // Log for debugging if a change happened in a background tab.
+        console.log(
+          `TaskSelectorManager: Selection changed for BV ${bvId} in a non-visible tab.`,
+        );
       }
-    },
-
-    isTaskSelected: (taskId: string /* cid */): boolean => {
-      return !!(selectedTasks[taskId] && !selectedTasks[taskId].marked);
-    },
-
-    isAnyTaskSelectedForBv: (bvId: string): boolean => {
-      if (!bvId) return false;
-      // Iterate through selectedTasks and check their bv property
-      for (const taskId in selectedTasks) {
-        const selTaskInfo = selectedTasks[taskId];
-        if (selTaskInfo.bv === bvId && !selTaskInfo.marked) {
-          return true;
-        }
-      }
-      // Fallback: iterate allTasksData if selectedTasks might not be fully populated with BV (shouldn't happen)
-      // for (const tabId in allTasksData) {
-      //     const parentTask = allTasksData[tabId].tasks.find(pt => pt.bv === bvId);
-      //     if (parentTask && parentTask.children.some(child => selectedTasks[child.id] && !selectedTasks[child.id].marked)) {
-      //         return true;
-      //     }
-      // }
-      return false;
     },
   };
   window.TaskSelectorManager = TaskSelectorManager;
@@ -2578,7 +2834,7 @@ function BiliSelectScript(initialMediaId: string, window: CustomWindow): void {
           // cardStateChangedInStorage = true;
         } else {
           const originSelection = selectionStorage[originMediaId!];
-          originSelection.splice(originSelection.indexOf(bvId), 1);
+          originSelection?.splice(originSelection.indexOf(bvId), 1);
         }
         cardStateChangedInStorage = true;
       }

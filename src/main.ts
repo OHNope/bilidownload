@@ -1,9 +1,9 @@
-import { TaskSelectScript } from "./task-manager";
-import { BiliSelectScript } from "./bili-select";
 import { CustomWindow } from "./types";
-import { addSingleVideo, gmFetch } from "./utils";
+import { TaskSelectScript } from "./task-select";
+import { BiliSelectScript } from "./bili-select";
+import { gmFetch, addSingleVideo } from "./utils";
 
-export declare const unsafeWindow: CustomWindow;
+declare const unsafeWindow: CustomWindow;
 
 // CSS Selectors
 const CONTAINER_SELECTOR = "div.video-pod__list.section";
@@ -93,8 +93,6 @@ function extractKeysFromFirstContainer(
     console.log(`${LOG_PREFIX_MAIN} Fetching folders for up_mid: ${upMid}`);
 
     try {
-      // Use GM_xmlhttpRequest to fetch the folder list
-
       const json = await gmFetch<any>({
         method: "GET",
         url: `https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${upMid}`,

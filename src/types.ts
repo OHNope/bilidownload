@@ -1,10 +1,3 @@
-// --- TypeScript Type Definitions ---
-export declare function GM_xmlhttpRequest(
-  details: GMXMLHttpRequestDetails,
-): void;
-// Extend Window interface for global properties
-// --- TypeScript Type Definitions ---
-
 export interface TaskSelectorManagerAPI {
   addTaskData: (
     tabId: string,
@@ -56,4 +49,12 @@ export interface CustomWindow extends Window {
   removeBiliSelections?: (mediaId: string, bvIdsToRemove: string[]) => void;
   unsafeWindow?: CustomWindow;
   URL: typeof URL;
+}
+// --- TypeScript Type Definitions ---
+interface GmXhrHandle {
+  abort: () => void;
+}
+// REPLACE THE OLD DECLARATION WITH THIS CORRECTED ONE
+declare global {
+  const GM_xmlhttpRequest: (details: any) => GmXhrHandle;
 }

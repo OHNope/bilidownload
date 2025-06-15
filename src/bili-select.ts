@@ -71,7 +71,7 @@ export function BiliSelectScript(
           // cardStateChangedInStorage = true;
         } else {
           const originSelection = selectionStorage[originMediaId!];
-          originSelection.splice(originSelection.indexOf(bvId), 1);
+          originSelection?.splice(originSelection.indexOf(bvId), 1);
         }
         cardStateChangedInStorage = true;
       }

@@ -8,6 +8,38 @@ interface GmFetchOptions {
   onprogress?: (event: any) => void;
   // ... other GM_xhr options
 }
+
+export async function gmFetch<T>(options: GmFetchOptions): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    GM_xmlhttpRequest({
+      ...options,
+      // default headers/method can be set here
+      onload: (response: any) => {
+        // Centralised status check
+        if (response.status >= 200 && response.status < 300) {
+          // response.response automatically handles json/blob/text
+          resolve(response.response as T);
+        } else {
+          // Standardised error
+          reject(
+            new Error(
+              `[GM_API] HTTP Error ${response.status}: ${response.statusText} for ${options.url}`,
+            ),
+          );
+        }
+      },
+      onerror: (error: any) =>
+        reject(
+          new Error(
+            `[GM_API] Network Error: ${JSON.stringify(error)} for ${options.url}`,
+          ),
+        ),
+      ontimeout: () => reject(new Error(`[GM_API] Timeout for ${options.url}`)),
+      onprogress: options.onprogress, // Pass through
+    });
+  });
+}
+
 export async function addSingleVideo(
   tabId: string, // media_id from BiliSelectScript
   tabName: string, // folder name from BiliSelectScript
@@ -73,35 +105,4 @@ export async function addSingleVideo(
       error,
     );
   }
-}
-
-export async function gmFetch<T>(options: GmFetchOptions): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    GM_xmlhttpRequest({
-      ...options,
-      // default headers/method can be set here
-      onload: (response: any) => {
-        // Centralised status check
-        if (response.status >= 200 && response.status < 300) {
-          // response.response automatically handles json/blob/text
-          resolve(response.response as T);
-        } else {
-          // Standardised error
-          reject(
-            new Error(
-              `[GM_API] HTTP Error ${response.status}: ${response.statusText} for ${options.url}`,
-            ),
-          );
-        }
-      },
-      onerror: (error: any) =>
-        reject(
-          new Error(
-            `[GM_API] Network Error: ${JSON.stringify(error)} for ${options.url}`,
-          ),
-        ),
-      ontimeout: () => reject(new Error(`[GM_API] Timeout for ${options.url}`)),
-      onprogress: options.onprogress, // Pass through
-    });
-  });
 }

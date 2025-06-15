@@ -79,11 +79,24 @@ interface SelectedTask extends Task {
   marked: boolean;
 }
 
+// Define the structure for our flattened list
+interface FlatTaskItem {
+  type: "parent" | "child";
+  data: ParentTask | Task;
+  parent?: ParentTask; // For child tasks
+  top: number;
+  height: number;
+}
+
 interface TabState {
   taskScrollTop: number;
   tabScrollLeft: number;
   needsRender: boolean;
   lastRenderedScrollTop: number;
+  // ADD THIS
+  flatListCache?: FlatTaskItem[];
+  // ADD THIS
+  needsCacheUpdate?: boolean;
 }
 
 interface WindowUiState {
@@ -783,6 +796,7 @@ function TaskSelectScript(window: CustomWindow): void {
   function toggleParentTaskExpansion(parentTask: ParentTask): void {
     parentTask.isExpanded = !parentTask.isExpanded;
     if (currentTabId && tabStates[currentTabId]) {
+      tabStates[currentTabId].needsCacheUpdate = true;
       tabStates[currentTabId].needsRender = true;
       tabStates[currentTabId].lastRenderedScrollTop = -1; // Force a full re-render
       scheduleTick();
@@ -882,15 +896,6 @@ function TaskSelectScript(window: CustomWindow): void {
     }
   }
 
-  // Define the structure for our flattened list
-  interface FlatTaskItem {
-    type: "parent" | "child";
-    data: ParentTask | Task;
-    parent?: ParentTask; // For child tasks
-    top: number;
-    height: number;
-  }
-
   function renderTasksForCurrentTab(forceUpdate: boolean = false): void {
     const state = currentTabId ? tabStates[currentTabId] : null;
     if (
@@ -918,30 +923,42 @@ function TaskSelectScript(window: CustomWindow): void {
     if (containerHeight <= 0 && !forceUpdate) return;
 
     // --- 1. Flatten Data and Calculate Positions ---
-    const flatItems: FlatTaskItem[] = [];
-    let currentY = 5; // Start with top padding of 5px
-    allTasksData[currentTabId].tasks.forEach((parentTask) => {
-      flatItems.push({
-        type: "parent",
-        data: parentTask,
-        top: currentY,
-        height: PARENT_TASK_ITEM_HEIGHT,
-      });
-      currentY += PARENT_TASK_ITEM_HEIGHT;
-      if (parentTask.isExpanded) {
-        parentTask.children.forEach((childTask) => {
-          flatItems.push({
-            type: "child",
-            data: childTask,
-            parent: parentTask,
-            top: currentY,
-            height: CHILD_TASK_ITEM_HEIGHT,
-          });
-          currentY += CHILD_TASK_ITEM_HEIGHT;
+    if (state.needsCacheUpdate || !state.flatListCache) {
+      console.log(`[Perf] Updating flat list cache for tab: ${currentTabId}`);
+      const flatItems: FlatTaskItem[] = [];
+      let currentY = 5;
+      allTasksData[currentTabId].tasks.forEach((parentTask) => {
+        flatItems.push({
+          type: "parent",
+          data: parentTask,
+          top: currentY,
+          height: PARENT_TASK_ITEM_HEIGHT,
         });
-      }
-    });
-    const totalHeight = currentY + 5; // Add bottom padding
+        currentY += PARENT_TASK_ITEM_HEIGHT;
+        if (parentTask.isExpanded) {
+          parentTask.children.forEach((childTask) => {
+            flatItems.push({
+              type: "child",
+              data: childTask,
+              parent: parentTask,
+              top: currentY,
+              height: CHILD_TASK_ITEM_HEIGHT,
+            });
+            currentY += CHILD_TASK_ITEM_HEIGHT;
+          });
+        }
+      });
+      state.flatListCache = flatItems; // Store in cache
+      state.needsCacheUpdate = false; // Reset flag
+    }
+
+    const flatItems = state.flatListCache!;
+    const totalHeight =
+      flatItems.length > 0
+        ? flatItems[flatItems.length - 1].top +
+          flatItems[flatItems.length - 1].height +
+          5
+        : 10;
 
     // --- 2. Update the Spacer Height ---
     const spacer = taskListContainer.querySelector(
@@ -1570,7 +1587,17 @@ function TaskSelectScript(window: CustomWindow): void {
       }
     });
 
-    download(tasksForDownload, nId);
+    download(tasksForDownload, nId).catch((err) => {
+      console.error(
+        "[ConfirmSelection] The download process encountered a critical failure:",
+        err,
+      );
+      // Optionally, notify the user
+      alert("下载过程遭遇严重错误，已中断。详情请查看控制台。");
+      // Optionally, close the newly created progress window if it's now useless
+      closeProgressWindow(nId);
+    });
+
     console.log(
       "Selection confirmed. Active selection cleared, tasks are now marked for processing.",
     );
@@ -1831,73 +1858,19 @@ function TaskSelectScript(window: CustomWindow): void {
     }
   }
 
-  function selectVisibleTasks(): void {
+  // In TaskSelectScript, near the button actions
+  function processVisibleTasks(
+    action: (taskId: string, parentBvId: string) => boolean,
+  ): void {
     if (!taskListContainer || windowState.collapsed) return;
 
     const containerRect = taskListContainer.getBoundingClientRect();
-    // Querying for child tasks is correct, as they are the only selectable items.
     const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
       ".task-selector-child-task",
     );
 
-    let newlySelectedCount = 0;
     const affectedBvIds = new Set<string>();
-
-    childTaskItems.forEach((item) => {
-      const itemRect = item.getBoundingClientRect();
-      const taskId = item.dataset.taskId;
-      const parentBvId = item.dataset.bv;
-
-      if (!taskId || !parentBvId) {
-        return;
-      }
-
-      const isVisible =
-        itemRect.top < containerRect.bottom &&
-        itemRect.bottom > containerRect.top;
-
-      // --- KEY CHANGE HERE ---
-      // The condition is now much simpler and clearer.
-      // We select it if it's visible AND not in EITHER of our state Sets.
-      if (
-        isVisible &&
-        !selectedTaskIds.has(taskId) &&
-        !markedTaskIds.has(taskId)
-      ) {
-        // 1. Update the UI. We only need to add 'selected'.
-        item.classList.add("selected");
-
-        // 2. Update the application's state. This is now a single, simple operation.
-        selectedTaskIds.add(taskId);
-
-        newlySelectedCount++;
-        affectedBvIds.add(parentBvId);
-      }
-    });
-
-    // 3. Sync state with the BiliSelect script (this logic remains the same).
-    if (newlySelectedCount > 0 && window.BiliSelectScriptAPI) {
-      affectedBvIds.forEach((bvId) => {
-        window.BiliSelectScriptAPI?.selectVideoCardByBv(bvId, true, true);
-      });
-    }
-
-    console.log(
-      `Selected ${newlySelectedCount} visible tasks. Total active selections: ${selectedTaskIds.size}`,
-    );
-  }
-
-  function deselectVisibleTasks(): void {
-    if (!taskListContainer || windowState.collapsed) return;
-
-    const containerRect = taskListContainer.getBoundingClientRect();
-    const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
-      ".task-selector-child-task",
-    );
-
-    let deselectedCount = 0;
-    // We'll gather all parent BVs whose children were deselected.
-    const bvsToUpdate = new Set<string>();
+    let changed = false;
 
     childTaskItems.forEach((item) => {
       const itemRect = item.getBoundingClientRect();
@@ -1910,41 +1883,58 @@ function TaskSelectScript(window: CustomWindow): void {
         itemRect.top < containerRect.bottom &&
         itemRect.bottom > containerRect.top;
 
-      // --- KEY CHANGE HERE ---
-      // The condition to act is simple: Is the item visible AND is its ID in our selection Set?
-      if (isVisible && selectedTaskIds.has(taskId)) {
-        // 1. Update the application state by removing the ID.
-        selectedTaskIds.delete(taskId);
-
-        // 2. Update the UI by removing the 'selected' class.
-        item.classList.remove("selected");
-
-        // 3. Track our changes for the final summary and sync.
-        deselectedCount++;
-        bvsToUpdate.add(parentBvId);
+      if (isVisible) {
+        // Execute the provided action and check if it made a change
+        if (action(taskId, parentBvId)) {
+          changed = true;
+          affectedBvIds.add(parentBvId);
+        }
       }
     });
 
-    // --- SYNC LOGIC ---
-    // If we actually deselected anything, we need to check if the parent video
-    // cards on the main page should also be deselected.
-    if (deselectedCount > 0 && window.BiliSelectScriptAPI) {
-      bvsToUpdate.forEach((bvId) => {
-        // Check if ANY OTHER task for this BV is still selected.
-        const anyOtherTaskForBvIsSelected =
-          TaskSelectorManager.isAnyTaskSelectedForBv(bvId);
-
-        // Only deselect the card if NO tasks for this BV remain in the selection.
-        if (!anyOtherTaskForBvIsSelected) {
-          window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, false, true);
-        }
-      });
+    // If any change occurred, re-render the list and sync with BiliSelectScript
+    if (changed) {
+      renderTasksForCurrentTab(true);
+      if (window.BiliSelectScriptAPI) {
+        affectedBvIds.forEach((bvId) => {
+          const shouldBeSelected =
+            TaskSelectorManager.isAnyTaskSelectedForBv(bvId);
+          window.BiliSelectScriptAPI!.selectVideoCardByBv(
+            bvId,
+            shouldBeSelected,
+            true,
+          );
+        });
+      }
     }
+  }
 
+  function selectVisibleTasks(): void {
+    processVisibleTasks((taskId) => {
+      if (!selectedTaskIds.has(taskId) && !markedTaskIds.has(taskId)) {
+        selectedTaskIds.add(taskId);
+        return true; // Return true indicating a change was made
+      }
+      return false;
+    });
     console.log(
-      `Deselected ${deselectedCount} visible tasks. Total active selections: ${selectedTaskIds.size}`,
+      `Selected visible tasks. Total active selections: ${selectedTaskIds.size}`,
     );
   }
+
+  function deselectVisibleTasks(): void {
+    processVisibleTasks((taskId) => {
+      if (selectedTaskIds.has(taskId)) {
+        selectedTaskIds.delete(taskId);
+        return true; // Return true indicating a change was made
+      }
+      return false;
+    });
+    console.log(
+      `Deselected visible tasks. Total active selections: ${selectedTaskIds.size}`,
+    );
+  }
+
   function deselectAllTasks(): void {
     // If there's nothing selected, there's nothing to do.
     if (selectedTaskIds.size === 0) {
@@ -2588,6 +2578,7 @@ function TaskSelectScript(window: CustomWindow): void {
         taskListContainer
       ) {
         if (tabStates[sId]) {
+          tabStates[currentTabId].needsCacheUpdate = true;
           tabStates[sId].needsRender = true;
           tabStates[sId].lastRenderedScrollTop = -1;
         }

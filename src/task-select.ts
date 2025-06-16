@@ -1544,7 +1544,7 @@ export function TaskSelectScript(window: CustomWindow): void {
         // 这个也可以重试，但通常不是主要问题，这里保持原样或简化
         updateTaskStateById(wid, taskId, {
           status: "downloading",
-          progress: 5,
+          progress: 0,
         }); // 状态: 开始获取信息
         const videoInfoText = await gmFetchWithRetry<string>(
           {
@@ -2486,7 +2486,7 @@ export function TaskSelectScript(window: CustomWindow): void {
           name: videoInput.videoTitle,
           bv: videoInput.bvId,
           children: children,
-          isExpanded: false, // Default to collapsed
+          isExpanded: true, // Default to collapsed
           MediaId: tabId,
         };
         tabParentTasks.push(newParentTask);

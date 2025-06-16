@@ -6,13 +6,12 @@
   "type": "module",
   "scripts": {
     "build:types": "tsc --emitDeclarationOnly",
-    "build": "node build.cjs && npm run build:types"
+    "build": "node build.cjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "dts-bundle-generator": "^9.5.1",
     "esbuild": "^0.25.5",
     "typescript": "^5.8.3"
   }

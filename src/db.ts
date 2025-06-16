@@ -27,6 +27,7 @@ export async function saveChunk(taskId: string, chunk: Blob): Promise<void> {
     const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     const request = store.put(chunk, taskId);
+    void request;
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });
@@ -38,6 +39,7 @@ export async function getChunk(taskId: string): Promise<Blob | undefined> {
     const transaction = db.transaction(STORE_NAME, "readonly");
     const store = transaction.objectStore(STORE_NAME);
     const request = store.get(taskId);
+    void request;
     request.onsuccess = () => resolve(request.result as Blob | undefined);
     request.onerror = () => reject(request.error);
   });
@@ -49,6 +51,7 @@ export async function deleteChunk(taskId: string): Promise<void> {
     const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     const request = store.delete(taskId);
+    void request;
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });

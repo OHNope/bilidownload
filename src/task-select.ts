@@ -588,11 +588,29 @@ export function TaskSelectScript(window: CustomWindow): void {
       .task-progress-title { font-weight: bold; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 10px; }
       .task-progress-close-btn { background: #ffcccc; border: 1px solid #ffaaaa; color: #a00; border-radius: 50%; width: 18px; height: 18px; line-height: 16px; text-align: center; cursor: pointer; font-weight: bold; display: none; font-size: 12px; flex-shrink: 0; }
       .task-progress-close-btn.visible { display: block; }
-      .task-progress-list-container { flex-grow: 1; overflow-y: auto; padding: 0 8px; scrollbar-width: none; -ms-overflow-style: none; }
+      .task-progress-list-container { flex-grow: 1;
+          overflow-y: auto;
+          padding: 8px 0; /* 修改: 上下增加一点内边距，左右移除 */
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+          position: relative;}
       .task-progress-list-container::-webkit-scrollbar { display: none; }
-      .task-progress-item { margin: 0 0 8px 0; padding: 5px; border: 1px solid #eee; border-radius: 3px; background-color: #f9f9f9; display: flex; flex-direction: column; min-height: ${
-        PROGRESS_ITEM_HEIGHT - 18
-      }px; height: auto; }
+      .task-progress-item {
+          padding: 5px 8px; /* 左右内边距在这里控制 */
+          border: 1px solid #eee;
+          border-radius: 3px;
+          background-color: #f9f9f9;
+          display: flex;
+          flex-direction: column;
+
+          /* --- 新的虚拟化样式 --- */
+          position: absolute;
+          left: 8px; /* 与容器左右内边距匹配 */
+          right: 8px;
+          height: ${PROGRESS_ITEM_HEIGHT}px; /* 固定高度 */
+          box-sizing: border-box; /* 关键！*/
+          /* top 属性将由 JS 设置 */
+      }
       .task-progress-item-name { font-size: 12px; margin-bottom: 4px; white-space: normal; word-break: break-word; }
       .task-progress-bar-container { height: 10px; background-color: #e0e0e0; border-radius: 5px; overflow: hidden; border: 1px solid #d0d0d0; flex-shrink: 0; margin-top: auto; }
 
@@ -985,58 +1003,75 @@ export function TaskSelectScript(window: CustomWindow): void {
   }
 
   /**
-   * Handles the browser's 'online' event. Finds all failed tasks and
-   * creates a new download batch for them in a new window.
+   * Handles the browser's 'online' event. Finds all failed tasks within each
+   * progress window and restarts the download process for them in place.
    */
   async function handleConnectionRestored(): Promise<void> {
     console.log(
       "[Network] Connection restored. Checking for failed downloads to restart.",
     );
 
-    const tasksToRestart: SelectedTask[] = [];
-    const originalTasksToUpdate: {
-      task: ProgressTaskItem;
-      windowId: string;
-    }[] = [];
+    let totalRestartedCount = 0;
 
-    // Collect all failed tasks from all progress windows
+    // 遍历每一个独立的进度窗口
     for (const windowId in progressWindows) {
       const pwData = progressWindows[windowId];
-      const isCompleted = pwData.tasks.every((t) => t.status === "completed");
-      if (isCompleted) {
-        continue; // Skip fully completed windows
-      }
+      if (!pwData) continue;
 
-      pwData.tasks.forEach((task) => {
-        if (task.status === "failed") {
-          // Ensure we don't add the same task twice
-          if (!tasksToRestart.some((rt) => rt.id === task.id)) {
-            tasksToRestart.push({
-              id: task.id,
-              name: task.name,
-              bv: task.bv,
-              marked: false,
-            });
-            originalTasksToUpdate.push({ task, windowId });
-          }
-        }
-      });
-    }
-
-    if (tasksToRestart.length > 0) {
-      console.log(
-        `[Network] Found ${tasksToRestart.length} failed tasks. Creating a new download batch.`,
+      // 1. 找出当前窗口中所有失败的任务
+      const tasksToRestartInWindow = pwData.tasks.filter(
+        (t) => t.status === "failed",
       );
 
-      // Update the UI of the original failed tasks to show they are being handled
-      originalTasksToUpdate.forEach(({ task, windowId }) => {
-        updateTaskStateById(windowId, task.id, { status: "restarted" as any });
+      // 如果这个窗口里没有失败的任务，就跳过
+      if (tasksToRestartInWindow.length === 0) {
+        continue;
+      }
+
+      console.log(
+        `[Network] Found ${tasksToRestartInWindow.length} failed tasks in window ${windowId}. Preparing to restart in place.`,
+      );
+      totalRestartedCount += tasksToRestartInWindow.length;
+
+      // 2. 准备一个只包含这些失败任务的下载对象
+      const tasksForDownload: Record<string, SelectedTask> = {};
+      tasksToRestartInWindow.forEach((task) => {
+        // 关键：立即更新UI，将任务状态重置为“等待中”，给用户即时反馈
+        updateTaskStateById(windowId, task.id, {
+          status: "pending",
+          progress: 0,
+        });
+
+        // 将任务添加到待下载的集合中
+        tasksForDownload[task.id] = {
+          id: task.id,
+          name: task.name,
+          bv: task.bv,
+          marked: true, // 内部状态，设为true即可
+        };
       });
 
-      // Start a new download process for the failed tasks
-      startDownloadBatch(tasksToRestart);
+      // 3. 直接调用核心 download 函数，但传入的是当前窗口ID和仅失败的任务
+      // 我们不需要等待它完成(no await)，让它在后台运行即可
+      // 添加 .catch 以防止一个窗口的重启失败影响到其他窗口
+      download(tasksForDownload, windowId).catch((error) => {
+        console.error(
+          `[Network] A critical error occurred while restarting tasks for window ${windowId}:`,
+          error,
+        );
+        // 如果重启过程本身都失败了，最好把任务状态再次标记为失败
+        tasksToRestartInWindow.forEach((task) => {
+          updateTaskStateById(windowId, task.id, {
+            status: "failed",
+            progress: 0,
+          });
+        });
+      });
+    } // 结束对所有窗口的遍历
+
+    if (totalRestartedCount > 0) {
       alert(
-        `网络已恢复, 已为 ${tasksToRestart.length} 个失败的任务开启了新的下载批次。`,
+        `网络已恢复, 已在现有窗口中尝试重新启动 ${totalRestartedCount} 个失败的任务。`,
       );
     } else {
       console.log("[Network] No failed tasks found to restart.");
@@ -2090,6 +2125,8 @@ export function TaskSelectScript(window: CustomWindow): void {
     pw.closeButton.classList.toggle("visible", allDone);
   }
 
+  // 文件: src/task-select.ts
+
   function renderProgressItems(
     wId: string,
     forceUpdate: boolean = false,
@@ -2119,15 +2156,20 @@ export function TaskSelectScript(window: CustomWindow): void {
     );
 
     const fragment = document.createDocumentFragment();
-    listContainer.innerHTML = ""; // Clear
+    listContainer.innerHTML = ""; // 清空容器
 
-    const paddingTop = startIndex * PROGRESS_ITEM_HEIGHT;
-    const paddingBottom = (tasks.length - endIndex) * PROGRESS_ITEM_HEIGHT;
+    // --- 主要变化：使用一个 spacer 撑开总高度 ---
+    const totalHeight = tasks.length * PROGRESS_ITEM_HEIGHT;
+    const spacer = document.createElement("div");
+    spacer.style.position = "absolute";
+    spacer.style.top = "0";
+    spacer.style.left = "0";
+    spacer.style.height = `${totalHeight}px`;
+    spacer.style.width = "1px";
+    spacer.style.zIndex = "-1"; // 把它放在最底层
+    fragment.appendChild(spacer);
 
-    const topSpacer = document.createElement("div");
-    topSpacer.style.height = `${paddingTop}px`;
-    fragment.appendChild(topSpacer);
-
+    // 只渲染可见区域的元素
     for (let i = startIndex; i < endIndex; i++) {
       if (tasks[i]) {
         const t = tasks[i];
@@ -2135,29 +2177,43 @@ export function TaskSelectScript(window: CustomWindow): void {
         it.className = "task-progress-item";
         it.dataset.taskId = t.id;
         it.dataset.bv = t.bv;
-        it.setAttribute("draggable", "false");
+
+        // --- 主要变化：通过 style.top 定位 ---
+        // 现在 top 是相对于 listContainer 的，因为我们加了 position: relative
+        it.style.top = `${i * PROGRESS_ITEM_HEIGHT}px`;
 
         const nS = document.createElement("div");
         nS.className = "task-progress-item-name";
         nS.textContent = t.name;
 
+        // 添加状态文本 (这部分逻辑是正确的，保持不变)
+        if (
+          t.status !== "downloading" &&
+          t.status !== "pending" &&
+          t.status !== "completed"
+        ) {
+          const statusTextElem = document.createElement("span");
+          statusTextElem.className = "task-progress-item-status-text";
+          let text = "";
+          if (t.status === "retrying") text = " (重试中...)";
+          if (t.status === "failed") text = " (下载失败)";
+          if (t.status === "restarted") text = " (已在新批次中重启)";
+          statusTextElem.textContent = text;
+          nS.appendChild(statusTextElem);
+        }
+
         const bC = document.createElement("div");
         bC.className = "task-progress-bar-container";
         const b = document.createElement("div");
         b.className = "task-progress-bar";
-        const cP = t.progress || 0;
-        b.style.width = `${cP}%`;
-        b.classList.toggle("completed", cP === 100);
-        bC.appendChild(b);
+        b.classList.add(`status-${t.status}`);
+        b.style.width = `${t.progress || 0}%`;
 
+        bC.appendChild(b);
         it.append(nS, bC);
         fragment.appendChild(it);
       }
     }
-
-    const bottomSpacer = document.createElement("div");
-    bottomSpacer.style.height = `${paddingBottom}px`;
-    fragment.appendChild(bottomSpacer);
 
     listContainer.appendChild(fragment);
 
@@ -2168,10 +2224,8 @@ export function TaskSelectScript(window: CustomWindow): void {
       const forcedScrollTop = pwState.scrollTop ?? 0;
       requestAnimationFrame(() => {
         if (listContainer && progressWindows[wId]) {
-          // Check if window still exists
           listContainer.scrollTop = forcedScrollTop;
           if (progressWindows[wId]) {
-            // Check again as RAF is async
             progressWindows[wId].state.lastRenderedScrollTop =
               listContainer.scrollTop;
           }

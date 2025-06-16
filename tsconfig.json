@@ -1,16 +1,20 @@
+// tsconfig.json
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
+    "target": "es2020",
+    "module": "esnext", // 或者 commonjs, 根据你的需求
+    "lib": ["es2020", "dom"],
+    "declaration": true, // 核心：生成 .d.ts 文件
+    "emitDeclarationOnly": true, // 仅生成 .d.ts 文件，不生成 .js 文件
+    "declarationDir": "dist/types", // .d.ts 文件的输出目录
+    // "outDir": "dist/js",         // esbuild 负责 JS 输出，tsc 负责 types 输出，所以这里不冲突
+    "rootDir": "src", // 源文件根目录
+    "jsx": "react", // 如果使用 React
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-
-    // 💡 关键点: 确保 'moduleResolution' 设置为 'node'
-    // 这告诉 TypeScript (以及遵循它的 esbuild) 使用 Node.js 的模块解析策略，
-    // 它能正确地处理不带扩展名的导入。
-    "moduleResolution": "node"
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["node_modules", "dist"]
 }

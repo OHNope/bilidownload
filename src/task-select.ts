@@ -1,4 +1,5 @@
 import { CustomWindow, TaskSelectorManagerAPI } from "./types";
+import { deleteChunk, getChunk, saveChunk } from "./db";
 
 declare var JSZip: {
   new (): JSZipInstance;
@@ -1538,115 +1539,134 @@ export function TaskSelectScript(window: CustomWindow): void {
       task: SelectedTask,
     ): Promise<string> => {
       const taskId = String(task.id);
+      const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB chunks for better performance
+      const taskAbortController = new AbortController();
+      const taskAbortSignal = taskAbortController.signal;
+
+      const abortHandler = () => {
+        taskAbortController.abort();
+      };
+
+      activeDownloads.set(taskId, { abort: abortHandler });
+
+      taskAbortSignal.addEventListener("abort", () => {
+        console.log(`[Abort] Aborting all chunks for task: ${task.name}`);
+        if (activeDownloads.has(taskId)) {
+          activeDownloads.delete(taskId);
+        }
+      });
 
       try {
-        // --- Step A: 获取视频信息 (API调用) ---
-        // 这个也可以重试，但通常不是主要问题，这里保持原样或简化
+        // --- Step 1: Get Video Info & Total Size ---
         updateTaskStateById(wid, taskId, {
           status: "downloading",
           progress: 0,
-        }); // 状态: 开始获取信息
+        });
         const videoInfoText = await gmFetchWithRetry<string>(
           {
             method: "GET",
             url: `https://api.bilibili.com/x/player/playurl?bvid=${task.bv}&cid=${task.id}&qn=116&type=&otype=json&platform=html5&high_quality=1`,
-            headers: {
-              Referer: `https://www.bilibili.com/video/${task.bv}`,
-              "User-Agent": navigator.userAgent,
-            },
+            headers: { Referer: `https://www.bilibili.com/video/${task.bv}` },
             responseType: "text",
-            timeout: 30000, // 30 second timeout for API call
           },
           DOWNLOAD_RETRY_ATTEMPTS,
           DOWNLOAD_RETRY_DELAY_MS,
         );
-
         const jsonResponse = JSON.parse(videoInfoText);
-        // ... 错误检查 ...
+        if (jsonResponse.code !== 0)
+          throw new Error(jsonResponse.message || "Failed to get video URL");
         const videoUrl = jsonResponse.data.durl[0].url;
+        const totalSize = jsonResponse.data.durl[0].size;
 
-        // --- Step B: 下载视频 Blob ---
-        updateTaskStateById(wid, taskId, { progress: 10 }); // 状态: 准备下载
-        try {
-          const videoBlob = await gmFetchWithRetry<Blob>(
-            {
-              method: "GET",
-              url: videoUrl,
-              responseType: "blob",
-              headers: { Referer: "https://www.bilibili.com/" },
-              timeout: 600000,
-            },
-            DOWNLOAD_RETRY_ATTEMPTS,
-            DOWNLOAD_RETRY_DELAY_MS,
-            {
-              onStart: (handle) => {
-                // --- KEY CHANGE: Start tracking the download ---
-                activeDownloads.set(taskId, handle);
-                console.log(
-                  `[Download] Started tracking active download for task: ${task.name}`,
-                );
-              },
-              // 关键：在这里提供回调
-              onProgress: (progressEvent: any) => {
-                if (progressEvent.lengthComputable) {
-                  const percent = Math.round(
-                    (progressEvent.loaded / progressEvent.total) * 100,
-                  );
-                  // 下载时，状态是 'downloading'
-                  updateTaskStateById(wid, taskId, {
-                    status: "downloading",
-                    progress: percent,
-                  });
-                }
-              },
-              onRetry: (attempt: number, error: any) => {
-                console.log(
-                  `[Pool] 任务 ${task.name} 第 ${attempt} 次重试，原因:`,
-                  error.message,
-                );
-                // 状态变为 'retrying'，进度可以归零或保持
-                updateTaskStateById(wid, taskId, {
-                  status: "retrying",
-                  progress: 0,
-                });
-              },
-            },
+        // --- Step 2: Resumable Download Loop ---
+        let partialChunk = await getChunk(taskId);
+        let startByte = partialChunk ? partialChunk.size : 0;
+
+        // If a previously failed download was complete but not deleted from DB, use it directly.
+        if (partialChunk && startByte === totalSize) {
+          console.log(
+            `[Resume] Using fully downloaded chunk from DB for task: ${task.name}`,
           );
+        } else {
+          while (startByte < totalSize) {
+            if (taskAbortSignal.aborted)
+              throw new Error("Download aborted by user.");
 
-          // --- Step C: 添加到 Zip ---
-          if (videoBlob && videoBlob.size > 0) {
-            zip.file(task.name + ".mp4", videoBlob);
-            // 最终状态: completed
-            updateTaskStateById(wid, taskId, {
-              status: "completed",
-              progress: 100,
-            });
-            return `成功: ${task.name}`;
-          } else {
-            // 如果blob为空，也标记为失败
-            throw new Error("Downloaded blob is empty or invalid.");
-          }
-        } finally {
-          // --- KEY CHANGE: Stop tracking when done (success or failure) ---
-          if (activeDownloads.has(taskId)) {
-            activeDownloads.delete(taskId);
+            const endByte = Math.min(startByte + CHUNK_SIZE - 1, totalSize - 1);
             console.log(
-              `[Download] Stopped tracking download for task: ${task.name}`,
+              `[Download] Task ${task.name}: Requesting bytes ${startByte}-${endByte} of ${totalSize}`,
             );
+
+            const newChunkBlob = await new Promise<Blob>((resolve, reject) => {
+              const requestHandle = GM_xmlhttpRequest({
+                method: "GET",
+                url: videoUrl,
+                responseType: "blob",
+                headers: {
+                  Referer: "https://www.bilibili.com/",
+                  Range: `bytes=${startByte}-${endByte}`,
+                },
+                timeout: 120000, // 2 minutes timeout per chunk
+                onload: (response: any) => {
+                  if (response.status === 206 || response.status === 200) {
+                    resolve(response.response as Blob);
+                  } else {
+                    reject(
+                      new Error(`HTTP Error ${response.status} for chunk`),
+                    );
+                  }
+                },
+                onerror: (err: any) =>
+                  reject(new Error("Network Error for chunk")),
+                ontimeout: () => reject(new Error("Chunk download timed out")),
+                onabort: () => reject(new Error("Chunk download aborted.")),
+              });
+              taskAbortSignal.addEventListener("abort", () =>
+                requestHandle.abort(),
+              );
+            });
+
+            const combinedBlob = partialChunk
+              ? new Blob([partialChunk, newChunkBlob])
+              : newChunkBlob;
+            await saveChunk(taskId, combinedBlob);
+
+            partialChunk = combinedBlob;
+            startByte = partialChunk.size;
+
+            const percent = Math.round((startByte / totalSize) * 100);
+            updateTaskStateById(wid, taskId, {
+              status: "downloading",
+              progress: percent,
+            });
           }
+        }
+
+        // --- Step 3: Finalize ---
+        if (partialChunk && partialChunk.size >= totalSize) {
+          console.log(`[Download] Task ${task.name} completed successfully.`);
+          zip.file(task.name + ".mp4", partialChunk);
+          updateTaskStateById(wid, taskId, {
+            status: "completed",
+            progress: 100,
+          });
+          await deleteChunk(taskId); // Clean up storage on success
+          return `成功: ${task.name}`;
+        } else {
+          throw new Error("Download loop finished but file is incomplete.");
         }
       } catch (err: any) {
         console.error(
-          `[Pool] 任务 ${task.name} 在所有重试后失败:`,
+          `[Download] Task ${task.name} failed and will be paused:`,
           err.message,
         );
-        // 最终状态: failed
+        // On failure, DO NOT delete the chunk from IndexedDB.
         updateTaskStateById(wid, taskId, { status: "failed", progress: 0 });
-        // Ensure it's not still being tracked in case of an unexpected error
+        throw err;
+      } finally {
         if (activeDownloads.has(taskId)) {
           activeDownloads.delete(taskId);
         }
-        throw err; // 仍然需要抛出错误以停止 Promise.all
       }
     };
     // --- 2. Main execution block ---

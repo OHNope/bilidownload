@@ -1247,7 +1247,6 @@ export function TaskSelectScript(window: CustomWindow): void {
     updateSelectionFromBox(false);
   }
 
-  // In TaskSelectScript
   function handleMouseUpSelectBox(): void {
     // 1. 检查 isSelectingBox 状态
     if (!isSelectingBox) {
@@ -1422,48 +1421,6 @@ export function TaskSelectScript(window: CustomWindow): void {
   const debouncedTabsScrollSave = debounce(handleTabsScroll, 150);
 
   // --- Button Actions ---
-  /**
-   * Initiates a download process for a given array of tasks.
-   * Creates a new progress window and calls the main download function.
-   * @param tasksToStart The tasks to include in the batch.
-   * @returns The ID of the new progress window, or undefined if no tasks were provided.
-   */
-  function startDownloadBatch(
-    tasksToStart: SelectedTask[],
-  ): string | undefined {
-    if (tasksToStart.length === 0) {
-      return undefined;
-    }
-
-    console.log(
-      `Starting a new download batch for ${tasksToStart.length} tasks.`,
-    );
-
-    // Create the task objects for the new progress window
-    const progressTasks = tasksToStart.map((st) => ({
-      id: st.id,
-      name: st.name,
-      bv: st.bv,
-      marked: false,
-      progress: 0,
-      windowId: "",
-      status: "pending" as TaskDownloadStatus,
-    }));
-
-    const newWindowId = createProgressWindow(progressTasks);
-    console.log(`Created progress window for new batch: ${newWindowId}`);
-
-    // Prepare tasks for the download function
-    const tasksForDownload: Record<string, SelectedTask> = {};
-    tasksToStart.forEach((task) => {
-      tasksForDownload[task.id] = { ...task, marked: true };
-    });
-
-    // Call the main download function
-    download(tasksForDownload, newWindowId);
-
-    return newWindowId;
-  }
   function confirmSelection(): string | undefined {
     // 1. Get tasks to process directly from the selectedTaskIds Set.
     const tasksToProcess = Array.from(selectedTaskIds)

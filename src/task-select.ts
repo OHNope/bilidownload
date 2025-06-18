@@ -181,6 +181,14 @@ export function TaskSelectScript(window: CustomWindow): void {
   let progressWindows: Record<string, ProgressWindowData> = {};
   let progressWindowCounter = 0;
 
+  // --- 新增/修改用于框选和滚动的变量 ---
+  let lastClientX = 0; // 存储鼠标的最新X坐标
+  let lastClientY = 0; // 存储鼠标的最新Y坐标
+  let autoScrollDirection = 0; // -1 表示向上, 1 表示向下, 0 表示不滚动
+  const AUTO_SCROLL_ZONE_SIZE = 40; // 触发滚动的边缘区域大小
+  const AUTO_SCROLL_SPEED_MAX = 8; // 每次滚动的最大速度
+  // --- 结束新增/修改 ---
+
   let tickScheduled = false;
 
   // --- DOM 元素引用 ---
@@ -207,8 +215,64 @@ export function TaskSelectScript(window: CustomWindow): void {
       timeout = window.setTimeout(later, wait);
     };
   }
-  // --- 工具函数 --- (Add these new functions here)
+  // --- 工具函数 ---
+  // ... (debounce, createDragHandler 等函数)
+  /**
+   * 根据已存储的起始点和最新的鼠标坐标，更新选择框的视觉位置和尺寸。
+   * 这个函数是更新选择框样式的唯一来源，确保计算逻辑集中。
+   */
+  function updateSelectionBoxVisuals(): void {
+    if (!selectionBoxElement || !taskListContainer) return;
 
+    const lr = taskListContainer.getBoundingClientRect();
+
+    // 使用存储的最新坐标
+    const cX = lastClientX;
+    const cY = lastClientY;
+
+    // 计算选择框的四个角（在视口中的绝对坐标）
+    const bsX = Math.min(selectionBoxStart.x, cX);
+    const bsY = Math.min(selectionBoxStart.y, cY);
+    const beX = Math.max(selectionBoxStart.x, cX);
+    const beY = Math.max(selectionBoxStart.y, cY);
+
+    // 将视口坐标转换为相对于滚动容器内部的坐标
+    const fbX = bsX - lr.left + taskListContainer.scrollLeft;
+    const fbY = bsY - lr.top + taskListContainer.scrollTop;
+    const fbW = beX - bsX;
+    const fbH = beY - bsY;
+
+    Object.assign(selectionBoxElement.style, {
+      left: `${fbX}px`,
+      top: `${fbY}px`,
+      width: `${fbW}px`,
+      height: `${fbH}px`,
+    });
+  }
+
+  /**
+   * 主视觉循环，在鼠标按下和松开之间持续运行。
+   * 负责处理自动滚动和选择框的重绘。
+   */
+  function tickSelectionBox(): void {
+    // 如果鼠标已松开，则立即停止循环
+    if (!isSelectingBox) return;
+
+    // 1. 如果需要，执行自动滚动
+    if (autoScrollDirection !== 0 && taskListContainer) {
+      taskListContainer.scrollTop +=
+        AUTO_SCROLL_SPEED_MAX * autoScrollDirection;
+    }
+
+    // 2. 【关键修复】在每次循环（包括滚动后），都根据最新状态重绘选择框
+    updateSelectionBoxVisuals();
+
+    // 3. 根据重绘后的选择框，更新任务的高亮状态
+    updateSelectionFromBox(false);
+
+    // 4. 请求下一帧，以平滑地继续循环
+    requestAnimationFrame(tickSelectionBox);
+  }
   /**
    * Creates a generic drag handler for an element.
    * @param options - Configuration for the drag behavior.
@@ -1151,140 +1215,100 @@ export function TaskSelectScript(window: CustomWindow): void {
     windowState.collapsed = sCollapse;
   }
 
-  // In TaskSelectScript
   function handleMouseDownTaskList(event: MouseEvent): void {
     const target = event.target as HTMLElement;
-
-    // --- START OF FIX ---
-    // Check if the mousedown occurred on a task item (parent or child).
     const clickedOnTaskItem = target.closest(".task-selector-task-item");
-
     if (clickedOnTaskItem) {
-      // If the user clicked on a task, we should not start the drag-selection box.
-      // Instead, we do nothing and allow the standard 'click' event to fire,
-      // which will be handled by `handleChildTaskClick` or the parent task's toggles.
-      // This prevents `event.preventDefault()` from being called and blocking the click.
       return;
     }
-    // --- END OF FIX ---
-
-    // The rest of the function will now only execute if the user clicked on the
-    // background of the list, which is the correct behavior for starting a drag-selection.
 
     const containerRect = taskListContainer?.getBoundingClientRect();
-    if (!containerRect || event.clientX > containerRect.right - 15) {
-      // 15px for scrollbar
+    if (
+      !containerRect ||
+      !taskListContainer ||
+      event.clientX > containerRect.right - 15
+    ) {
       return;
     }
-
     event.preventDefault();
 
-    // --- NEW, EFFICIENT BLOCK ---
-    event.preventDefault(); // Keep this
+    // --- 关键修复：保证每次拖拽都使用全新的、干净的状态 ---
+    // 1. 强制移除任何可能残留的旧选择框，防止状态污染
+    container!.querySelector(".task-selection-box")?.remove();
+
+    // 2. 总是创建一个全新的元素，确保引用绝对有效
+    selectionBoxElement = document.createElement("div");
+    selectionBoxElement.className = "task-selection-box";
+    taskListContainer.appendChild(selectionBoxElement);
+    // --- 修复结束 ---
 
     isSelectingBox = true;
-    // The complex loop is replaced by a single, clean line of code.
-    // This creates a new Set containing a snapshot of the currently selected IDs.
     initialSelectedInTabForBoxOp = new Set(selectedTaskIds);
-
     selectionBoxStart = { x: event.clientX, y: event.clientY };
+    lastClientX = event.clientX;
+    lastClientY = event.clientY;
 
-    if (!selectionBoxElement) {
-      selectionBoxElement = document.createElement("div");
-      selectionBoxElement.className = "task-selection-box";
-      taskListContainer!.appendChild(selectionBoxElement);
-    }
-
-    const listContainerBoundingRect =
-      taskListContainer!.getBoundingClientRect();
-    const initialLeft =
-      event.clientX -
-      listContainerBoundingRect.left +
-      taskListContainer!.scrollLeft;
-    const initialTop =
-      event.clientY -
-      listContainerBoundingRect.top +
-      taskListContainer!.scrollTop;
-
-    Object.assign(selectionBoxElement.style, {
-      left: `${initialLeft}px`,
-      top: `${initialTop}px`,
-      width: "0px",
-      height: "0px",
-      display: "block",
-    });
+    Object.assign(selectionBoxElement.style, { display: "block" });
 
     document.addEventListener("mousemove", handleMouseMoveSelectBox, {
       passive: false,
     });
     document.addEventListener("mouseup", handleMouseUpSelectBox);
     document.body.style.userSelect = "none";
+
+    requestAnimationFrame(tickSelectionBox);
   }
 
   function handleMouseMoveSelectBox(event: MouseEvent): void {
-    if (!isSelectingBox || !selectionBoxElement || !taskListContainer) return;
+    if (!isSelectingBox) return;
     event.preventDefault();
+
+    // 1. 仅更新最新的鼠标坐标
+    lastClientX = event.clientX;
+    lastClientY = event.clientY;
+
+    // 2. 仅更新滚动方向信号
+    if (!taskListContainer) return;
     const lr = taskListContainer.getBoundingClientRect();
-    const cX = event.clientX;
-    const cY = event.clientY;
-
-    const bsX = Math.min(selectionBoxStart.x, cX);
-    const bsY = Math.min(selectionBoxStart.y, cY);
-    const beX = Math.max(selectionBoxStart.x, cX);
-    const beY = Math.max(selectionBoxStart.y, cY);
-
-    const fbX = bsX - lr.left + taskListContainer.scrollLeft;
-    const fbY = bsY - lr.top + taskListContainer.scrollTop;
-    const fbW = beX - bsX;
-    const fbH = beY - bsY;
-
-    Object.assign(selectionBoxElement.style, {
-      left: `${fbX}px`,
-      top: `${fbY}px`,
-      width: `${fbW}px`,
-      height: `${fbH}px`,
-    });
-    updateSelectionFromBox(false);
+    let scrollDirection = 0;
+    if (lastClientY < lr.top + AUTO_SCROLL_ZONE_SIZE) {
+      scrollDirection = -1;
+    } else if (lastClientY > lr.bottom - AUTO_SCROLL_ZONE_SIZE) {
+      scrollDirection = 1;
+    }
+    autoScrollDirection = scrollDirection;
   }
 
   function handleMouseUpSelectBox(): void {
-    // 1. 检查 isSelectingBox 状态
     if (!isSelectingBox) {
-      // 如果不是正在选择，可能说明之前的 mouseup 没正确处理，或者 mousedown 没正确设置
-      console.warn(
-        "handleMouseUpSelectBox called but isSelectingBox is false.",
-      );
-      // 尝试强制重置，以防万一
-      document.removeEventListener("mousemove", handleMouseMoveSelectBox);
-      document.removeEventListener("mouseup", handleMouseUpSelectBox);
-      document.body.style.userSelect = ""; // 恢复文本选择
-      if (selectionBoxElement) selectionBoxElement.style.display = "none";
-      initialSelectedInTabForBoxOp = new Set();
-      isSelectingBox = false; // 确保重置
       return;
     }
-    console.log("handleMouseUpSelectBox triggered. Finalizing selection.");
 
-    // 2. 重置 isSelectingBox 状态 *在处理完选择之后，但在移除监听器之前或之后都可以*
-    // 顺序：更新选择 -> 隐藏选择框 -> 移除监听器 -> 重置状态
-    // isSelectingBox = false; // 移动到末尾确保所有操作完成
-    // In handleMouseUpSelectBox
+    isSelectingBox = false;
+    autoScrollDirection = 0;
+
     try {
-      updateSelectionFromBox(true); // isFinal = true
+      // 这是关键：在松开鼠标时，调用 updateSelectionFromBox 的最终模式
+      updateSelectionFromBox(true);
     } catch (error) {
-      console.error("Error during updateSelectionFromBox in mouseup:", error);
+      console.error(
+        "Error during final updateSelectionFromBox in mouseup:",
+        error,
+      );
     } finally {
-      if (selectionBoxElement) {
-        selectionBoxElement.style.display = "none";
-      }
+      // --- 关键修复：彻底清理所有资源 ---
+      // 1. 从 DOM 中移除选择框元素
+      selectionBoxElement?.remove();
+      // 2. 将脚本中的引用设为 null
+      selectionBoxElement = null;
+      // 3. 移除事件监听器
       document.removeEventListener("mousemove", handleMouseMoveSelectBox);
       document.removeEventListener("mouseup", handleMouseUpSelectBox);
+      // 4. 恢复系统默认行为
       document.body.style.userSelect = "";
-      initialSelectedInTabForBoxOp = new Set();
-      isSelectingBox = false; // Ensure this is always reset
-      selectionBoxElement = null;
-
-      console.log("Drag selection cleanup completed in finally block.");
+      // 5. 清空本次操作的初始状态快照
+      initialSelectedInTabForBoxOp.clear();
+      // --- 修复结束 ---
     }
   }
 
@@ -1335,15 +1359,13 @@ export function TaskSelectScript(window: CustomWindow): void {
 
   // In TaskSelectScript
   function updateSelectionFromBox(isFinal: boolean = false): void {
-    if (!selectionBoxElement || (!isSelectingBox && !isFinal)) return;
+    if (!selectionBoxElement || !taskListContainer) return;
 
     const boxRectVP = selectionBoxElement.getBoundingClientRect();
-    if (boxRectVP.width === 0 && boxRectVP.height === 0 && !isFinal) return;
-
-    const childTaskItems = taskListContainer?.querySelectorAll<HTMLDivElement>(
+    const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
       ".task-selector-child-task",
     );
-    if (!childTaskItems || childTaskItems.length === 0) return;
+    if (childTaskItems.length === 0) return;
 
     const bvsAffected = new Set<string>();
 
@@ -1353,7 +1375,7 @@ export function TaskSelectScript(window: CustomWindow): void {
       const parentBvId = item.dataset.bv;
 
       if (!childTaskId || !parentBvId) return;
-      if (markedTaskIds.has(childTaskId)) return; // Don't change marked tasks
+      if (markedTaskIds.has(childTaskId)) return;
 
       const overlaps = !(
         itemRectVP.right < boxRectVP.left ||
@@ -1366,47 +1388,58 @@ export function TaskSelectScript(window: CustomWindow): void {
         initialSelectedInTabForBoxOp.has(childTaskId);
 
       if (isFinal) {
-        // --- Final selection logic (on mouseup) ---
+        // --- 拖拽结束模式：直接修改核心数据源 (selectedTaskIds) ---
         if (overlaps) {
           if (wasInitiallySelected) {
-            // It was selected, so the drag operation DESELECTS it.
             selectedTaskIds.delete(childTaskId);
           } else {
-            // It was not selected, so the drag operation SELECTS it.
             selectedTaskIds.add(childTaskId);
           }
         }
-        // After the drag, ensure the item's visual state matches the final truth.
-        item.classList.toggle("selected", selectedTaskIds.has(childTaskId));
         bvsAffected.add(parentBvId);
       } else {
-        // --- Preview logic (on mousemove) ---
+        // --- 拖拽中模式：只更新视觉样式，用于实时预览 ---
+        let shouldBeSelectedNow;
         if (overlaps) {
-          // If overlapping, its state is the INVERSE of its initial state.
-          item.classList.toggle("selected", !wasInitiallySelected);
+          // 状态反转：初始选中的，现在变为不选中；初始不选中的，现在变为选中
+          shouldBeSelectedNow = !wasInitiallySelected;
         } else {
-          // If not overlapping, its state REVERTS to its initial state.
-          item.classList.toggle("selected", wasInitiallySelected);
+          // 不在框内，则恢复为初始状态
+          shouldBeSelectedNow = wasInitiallySelected;
         }
+        item.classList.toggle("selected", shouldBeSelectedNow);
       }
     });
 
-    if (isFinal && window.BiliSelectScriptAPI) {
-      bvsAffected.forEach((bvIdToUpdate) => {
-        const shouldBeSelectedInBili =
-          TaskSelectorManager.isAnyTaskSelectedForBv(bvIdToUpdate);
-        window.BiliSelectScriptAPI!.selectVideoCardByBv(
-          bvIdToUpdate,
-          shouldBeSelectedInBili,
-          true,
-          // This part is slightly fragile, might need a better way to get mediaId
-          childTaskItems[0]?.dataset.mediaId,
-        );
-      });
+    if (isFinal) {
+      // --- 关键：在数据修改后，强制重绘整个列表，确保视图与数据同步 ---
+      renderTasksForCurrentTab(true);
+
+      if (window.BiliSelectScriptAPI) {
+        bvsAffected.forEach((bvIdToUpdate) => {
+          const shouldBeSelectedInBili =
+            TaskSelectorManager.isAnyTaskSelectedForBv(bvIdToUpdate);
+          window.BiliSelectScriptAPI!.selectVideoCardByBv(
+            bvIdToUpdate,
+            shouldBeSelectedInBili,
+            true,
+            childTaskItems[0]?.dataset.mediaId,
+          );
+        });
+      }
     }
   }
 
   function handleTaskListScroll(): void {
+    // --- 关键修复 ---
+    // 如果用户正在拖拽选择框，则完全跳过由滚动触发的虚拟渲染。
+    // 此时，所有的视觉更新都由 tickSelectionBox 主循环全权负责，
+    // 这可以防止选择框被意外地从DOM中移除。
+    if (isSelectingBox) {
+      return;
+    }
+    // --- 修复结束 ---
+
     if (!taskListContainer || !currentTabId || !tabStates[currentTabId]) return;
     const state = tabStates[currentTabId];
     state.taskScrollTop = taskListContainer.scrollTop;

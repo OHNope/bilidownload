@@ -132,15 +132,29 @@ export function BiliSelectScript(
     selectionStorage[currentMediaId] = [];
   }
   currentSelection = selectionStorage[currentMediaId];
+  // -- 拖拽与选择状态管理 --
+  let isMouseDown = false; // 替代旧的 isDragging
+  let didDrag = false; // 用于区分单击和拖拽
+  let isDragSelecting = false; // 标记是否正在进行框选
 
-  let isDragging = false;
+  let selectionRectElement: HTMLDivElement | null = null;
+  let videoListContainer: HTMLElement | null = null;
+
+  // --- 新增：高级框选所需的状态变量 ---
+  let lastClientX = 0;
+  let lastClientY = 0;
+  let autoScrollDirection = 0; // -1: up, 1: down, 0: none
+  let startScrollTop = 0;
+  let startContainerRect: DOMRect | null = null;
+  let selectionBoxStart = { x: 0, y: 0 };
+  let initialSelectedInDragOp = new Set<string>(); // 存储拖拽开始时的BV ID
+  const AUTO_SCROLL_ZONE_SIZE = 60; // 页面边缘触发滚动的区域大小 (px)
+  const AUTO_SCROLL_SPEED_MAX = 20; // 页面滚动的最大速度
+  // --- 结束新增 ---
   let startX = 0,
     startY = 0;
   let endX = 0,
     endY = 0;
-  let didDrag = false;
-  let selectionRectElement: HTMLDivElement | null = null;
-  let videoListContainer: HTMLElement | null = null;
 
   function log(...args: any[]): void {
     console.log(LOG_PREFIX, ...args);
@@ -160,6 +174,136 @@ export function BiliSelectScript(
       `Current Selection (${currentSelection.length} items):`,
       selectionPreview,
     );
+  }
+  /**
+   * 主视觉循环，在鼠标按下和松开之间持续运行。
+   * 负责处理自动滚动和选择框的重绘。
+   */
+  function tickDragSelectionLoop(): void {
+    if (!isDragSelecting) return;
+
+    // 1. 如果需要，执行页面自动滚动
+    if (autoScrollDirection !== 0) {
+      window.scrollBy(0, AUTO_SCROLL_SPEED_MAX * autoScrollDirection);
+    }
+
+    // 2. 更新选择框的视觉样式（处理坐标转换）
+    updateSelectionRectangleVisuals();
+
+    // 3. 根据选择框更新视频卡的“预览”选中状态
+    updateSelectionFromRectangle(false);
+
+    // 4. 请求下一帧，继续动画循环
+    requestAnimationFrame(tickDragSelectionLoop);
+  }
+
+  /**
+   * 根据已存储的起始点和最新的鼠标坐标，更新选择框的视觉位置和尺寸。
+   * 这个函数是更新选择框样式的唯一来源，并正确处理页面滚动带来的坐标转换。
+   */
+  function updateSelectionRectangleVisuals(): void {
+    if (!selectionRectElement) return;
+
+    // 1. 获取当前页面的滚动偏移量
+    const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
+    const scrollY = window.pageYOffset || document.documentElement.scrollTop;
+
+    // 2. 计算“锚点”（鼠标按下的点）在整个文档中的绝对坐标。
+    //    这个坐标在拖拽期间是固定不变的。
+    //    鼠标在视口中的初始位置 + 页面在拖拽开始时的滚动距离
+    const anchorX =
+      selectionBoxStart.x +
+      (startContainerRect?.left ?? 0) +
+      scrollX -
+      (document.documentElement.clientLeft || 0);
+    const anchorY = selectionBoxStart.y + startScrollTop;
+
+    // 3. 计算“活动点”（鼠标当前的位置）在整个文档中的绝对坐标。
+    //    这个坐标会随着鼠标移动而实时变化。
+    //    鼠标在视口中的当前位置 + 页面当前的滚动距离
+    const activeX = lastClientX + scrollX;
+    const activeY = lastClientY + scrollY;
+
+    // 4. 根据“锚点”和“活动点”这两个在同一坐标系下的点，确定选择框的最终样式。
+    const finalTop = Math.min(anchorY, activeY);
+    const finalLeft = Math.min(anchorX, activeX);
+    const finalHeight = Math.abs(anchorY - activeY);
+    const finalWidth = Math.abs(anchorX - activeX);
+
+    // 5. 应用样式
+    Object.assign(selectionRectElement.style, {
+      top: `${finalTop}px`,
+      left: `${finalLeft}px`,
+      height: `${finalHeight}px`,
+      width: `${finalWidth}px`,
+    });
+  }
+
+  /**
+   * 根据选择框的位置，更新视频卡的选中状态。
+   * @param {boolean} isFinal - 在mouseup时为true，用于将预览状态提交到数据层。
+   */
+  function updateSelectionFromRectangle(isFinal: boolean = false): void {
+    if (!selectionRectElement) return;
+
+    const rectBounds = selectionRectElement.getBoundingClientRect();
+    const container = findVideoListContainer();
+    if (!container) return;
+
+    const cards = container.querySelectorAll<HTMLElement>(VIDEO_CARD_SELECTOR);
+    if (cards.length === 0) return;
+
+    if (isFinal) {
+      // --- 提交模式 (isFinal = true) ---
+      // 遍历所有卡片，根据它们最终的视觉状态来更新数据
+      let changed = false;
+      cards.forEach((card) => {
+        const bvId = getBvId(card);
+        if (!bvId) return;
+
+        const isNowSelected = card.classList.contains(SELECTED_CLASS);
+        const wasOriginallySelected = initialSelectedInDragOp.has(bvId);
+
+        // 如果状态发生了变化，则调用 toggleSelection 来同步所有数据
+        if (isNowSelected !== wasOriginallySelected) {
+          changed = true;
+          // 注意：toggleSelection会反转状态，所以我们要确保调用它时，
+          // 卡片的当前状态是正确的。因为预览时已经设置了class，所以直接调用即可。
+          // toggleSelection 会处理所有事情：更新数组, 更新class, 同步TaskMgr。
+          // 但它会再次反转class，所以我们先反转一下
+          card.classList.toggle(SELECTED_CLASS);
+          toggleSelection(card);
+        }
+      });
+      if (changed) logState("Selection updated via drag");
+    } else {
+      // --- 预览模式 (isFinal = false) ---
+      cards.forEach((card) => {
+        if (isIntersecting(card, rectBounds)) {
+          const bvId = getBvId(card);
+          if (bvId && initialSelectedInDragOp.has(bvId)) {
+            removeSelectedStyle(card); // 初始选中的，在框内变为不选中
+          } else {
+            addSelectedStyle(card); // 初始不选中的，在框内变为选中
+          }
+        } else {
+          // 不在框内，恢复为初始状态
+          const bvId = getBvId(card);
+          if (bvId && initialSelectedInDragOp.has(bvId)) {
+            addSelectedStyle(card);
+          } else {
+            removeSelectedStyle(card);
+          }
+        }
+      });
+    }
+  }
+
+  function removeSelectionRect(): void {
+    if (selectionRectElement) {
+      selectionRectElement.remove();
+      selectionRectElement = null;
+    }
   }
 
   function getBvId(element: HTMLElement | null): string | null {
@@ -243,13 +387,6 @@ export function BiliSelectScript(
     selectionRectElement.style.height = `${height}px`;
   }
 
-  function removeSelectionRect(): void {
-    if (selectionRectElement) {
-      selectionRectElement.remove();
-      selectionRectElement = null;
-    }
-  }
-
   function isIntersecting(
     element: HTMLElement,
     rectBounds: { left: number; top: number; right: number; bottom: number },
@@ -320,93 +457,106 @@ export function BiliSelectScript(
 
   function handleMouseDown(event: MouseEvent): void {
     const target = event.target as HTMLElement;
-    if (!target.closest(EVENT_SCOPE_SELECTOR)) return;
-
     if (
+      !target.closest(EVENT_SCOPE_SELECTOR) ||
       event.button !== 0 ||
       target.closest(
         "a, button, input, .bili-card-dropdown, .bili-card-checkbox, .bili-card-watch-later",
       )
-    )
+    ) {
       return;
+    }
 
-    isDragging = true;
+    isMouseDown = true;
     didDrag = false;
-    startX = event.clientX;
-    startY = event.clientY;
-    endX = event.clientX;
-    endY = event.clientY;
+    isDragSelecting = true;
 
+    // 1. 捕获初始状态
+    lastClientX = event.clientX;
+    lastClientY = event.clientY;
+    selectionBoxStart = { x: event.clientX, y: event.clientY };
+    // 【关键】直接使用 window.pageYOffset 获取最准确的页面滚动值
+    startScrollTop = window.pageYOffset || document.documentElement.scrollTop;
+
+    // 2. 记录当前所有已选中项的 BV ID
+    initialSelectedInDragOp.clear();
+    currentSelection.forEach((bvId) => initialSelectedInDragOp.add(bvId));
+
+    // 3. 创建选择框
+    removeSelectionRect(); // 确保清理旧的
+    selectionRectElement = document.createElement("div");
+    selectionRectElement.id = SELECTION_RECT_ID;
+    document.body.appendChild(selectionRectElement);
+    selectionRectElement.style.display = "block";
+
+    // 4. 添加监听器并启动主循环
+    document.addEventListener("mousemove", handleMouseMove, { passive: false });
+    document.addEventListener("mouseup", handleMouseUp);
     document.body.style.userSelect = "none";
-    document.body.classList.add("custom-dragging-v3");
+    requestAnimationFrame(tickDragSelectionLoop);
   }
 
   function handleMouseMove(event: MouseEvent): void {
-    if (!isDragging) return;
+    if (!isMouseDown) return;
+    event.preventDefault();
 
-    endX = event.clientX;
-    endY = event.clientY;
-
-    if (
-      !didDrag &&
-      (Math.abs(endX - startX) > DRAG_THRESHOLD ||
-        Math.abs(endY - startY) > DRAG_THRESHOLD)
-    ) {
-      didDrag = true;
-      log("Drag started (threshold crossed)");
+    // 标记发生了拖拽
+    if (!didDrag) {
+      const dx = Math.abs(event.clientX - selectionBoxStart.x);
+      const dy = Math.abs(event.clientY - selectionBoxStart.y);
+      if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+        didDrag = true;
+      }
     }
 
-    if (didDrag) {
-      event.preventDefault();
-      updateSelectionRect();
+    // 轻量级更新：只更新坐标和滚动信号
+    lastClientX = event.clientX;
+    lastClientY = event.clientY;
+
+    let scrollDirection = 0;
+    if (lastClientY < AUTO_SCROLL_ZONE_SIZE) {
+      scrollDirection = -1; // 向上
+    } else if (lastClientY > window.innerHeight - AUTO_SCROLL_ZONE_SIZE) {
+      scrollDirection = 1; // 向下
     }
+    autoScrollDirection = scrollDirection;
   }
 
   function handleMouseUp(event: MouseEvent): void {
     void event;
-    if (!isDragging) return;
-    isDragging = false;
+    if (!isMouseDown) return;
 
+    // 停止主循环和所有相关状态
+    isMouseDown = false;
+    isDragSelecting = false;
+    autoScrollDirection = 0;
+
+    // 移除监听器和样式
+    document.removeEventListener("mousemove", handleMouseMove);
+    document.removeEventListener("mouseup", handleMouseUp);
     document.body.style.userSelect = "";
-    document.body.classList.remove("custom-dragging-v3");
 
     if (didDrag) {
-      log("Drag ended");
-      removeSelectionRect();
-      const rectBounds = {
-        left: Math.min(startX, endX),
-        top: Math.min(startY, endY),
-        right: Math.max(startX, endX),
-        bottom: Math.max(startY, endY),
-      };
-
-      const container = findVideoListContainer();
-      if (!container) {
-        log("Error: Cannot find container for drag selection.");
-        didDrag = false;
-        return;
-      }
-      const cards =
-        container.querySelectorAll<HTMLElement>(VIDEO_CARD_SELECTOR);
-      log(`DragSelect: Checking ${cards.length} cards...`);
-      let changedCount = 0;
-      cards.forEach((card) => {
-        if (isIntersecting(card, rectBounds)) {
-          toggleSelection(card);
-          changedCount++;
-        }
-      });
-      if (changedCount > 0)
-        logState(`Selection updated via drag (${changedCount} toggled)`);
-      else log("DragSelect: No items intersected.");
+      // 如果确实发生了拖拽，提交最终选择
+      updateSelectionFromRectangle(true);
     }
-    didDrag = false;
+
+    // 清理工作
+    removeSelectionRect();
+    startContainerRect = null;
+    initialSelectedInDragOp.clear();
   }
 
   function handleClick(event: MouseEvent): void {
+    // 如果是拖拽操作，则阻止后续的单击事件
+    if (didDrag) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
     const target = event.target as HTMLElement;
     if (!target.closest(EVENT_SCOPE_SELECTOR)) return;
-    if (didDrag) return; // Was a drag, not a click
 
     const targetCard = target.closest<HTMLElement>(VIDEO_CARD_SELECTOR);
     if (!targetCard) return;
@@ -565,11 +715,13 @@ export function BiliSelectScript(
                 background-color: rgba(0, 161, 214, 0.03);
             }
             #${SELECTION_RECT_ID} {
-                position: fixed;
-                border: 1px dashed #00a1d6;
-                background-color: rgba(0, 161, 214, 0.15);
-                z-index: 9999;
-                pointer-events: none;
+            position: absolute; /* <-- 修改这里 */
+                            top: 0; /* <-- 添加top和left以确保定位基准 */
+                            left: 0;
+                            border: 1px dashed #00a1d6;
+                            background-color: rgba(0, 161, 214, 0.15);
+                            z-index: 9999;
+                            pointer-events: none;
             }
             body.custom-dragging-v3 {
                 user-select: none !important;

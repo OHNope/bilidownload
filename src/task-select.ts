@@ -985,11 +985,11 @@ export function TaskSelectScript(window: CustomWindow): void {
 
     // --- 5. Efficiently Update the DOM ---
     // Remove all previous task items, but leave the spacer untouched
-    while (taskListContainer.childElementCount > 1) {
-      taskListContainer.lastChild!.remove();
-    }
+    const existingItems = taskListContainer.querySelectorAll(
+      ".task-selector-task-item",
+    );
+    existingItems.forEach((item) => item.remove());
     taskListContainer.appendChild(fragment);
-
     state.lastRenderedScrollTop = scrollTop;
     state.needsRender = false;
 
@@ -1439,15 +1439,15 @@ export function TaskSelectScript(window: CustomWindow): void {
     }
   }
 
+  // src/task-select.ts
+
   function handleTaskListScroll(): void {
-    // --- 关键修复：隔离冲突 ---
-    // 如果用户正在拖拽选择框 (isSelectingBox is true)，
-    // 则完全跳过由滚动触发的虚拟渲染。
-    // 这可以防止选择框和我们手动应用的 .selected 样式被意外地移除。
-    if (isSelectingBox) {
-      return;
-    }
-    // --- 修复结束 ---
+    // --- START: MODIFICATION ---
+    // The check "if (isSelectingBox)" has been removed.
+    // The virtual render triggered by scrolling is now allowed during drag-selection.
+    // The main selection loop (tickSelectionBox) will handle reapplying the correct
+    // "preview" styles to the newly rendered items on the next animation frame.
+    // --- END: MODIFICATION ---
 
     if (!taskListContainer || !currentTabId || !tabStates[currentTabId]) return;
     const state = tabStates[currentTabId];

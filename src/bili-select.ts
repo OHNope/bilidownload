@@ -550,6 +550,12 @@ export function BiliSelectScript(
   function handleClick(event: MouseEvent): void {
     // 如果是拖拽操作，则阻止后续的单击事件
     if (didDrag) {
+      // --- START: MODIFICATION ---
+      // 关键修复：在消耗掉拖拽状态后，立即将其重置。
+      // 这可以防止这个状态影响到后续与拖拽无关的点击事件。
+      didDrag = false;
+      // --- END: MODIFICATION ---
+
       event.preventDefault();
       event.stopPropagation();
       return;

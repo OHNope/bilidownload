@@ -1476,7 +1476,7 @@ export function TaskSelectScript(window: CustomWindow): void {
 
   /**
    * 【已重构】根据选择框的位置，更新子任务的选中状态。
-   * 采用“边界穿越”模式：当选框边缘每次穿过任务边界时，翻转其选中状态。
+   * 采用“边界穿越”模式，并实时同步父视频卡片的选中状态。
    * @param {boolean} isFinal - 在mouseup时为true，用于将预览状态提交到核心数据。
    */
   function updateSelectionFromBox(isFinal: boolean = false): void {
@@ -1484,13 +1484,11 @@ export function TaskSelectScript(window: CustomWindow): void {
 
     if (isFinal) {
       // --- 模式一：最终提交 (在 mouseup 时调用) ---
-
-      // 1. 将预览选择状态正式应用到核心选择状态
+      // 这部分逻辑保持不变，它已经是正确的。
       const oldSelectedIds = selectedTaskIds;
       selectedTaskIds = previewSelectedTaskIds;
-      previewSelectedTaskIds = new Set(); // 清空预览，以备后用
+      previewSelectedTaskIds = new Set();
 
-      // 2. 收集所有受影响的父视频BV ID，以便同步UI
       const affectedBvIds = new Set<string>();
       const allInvolvedIds = new Set([...oldSelectedIds, ...selectedTaskIds]);
       allInvolvedIds.forEach((id) => {
@@ -1500,10 +1498,8 @@ export function TaskSelectScript(window: CustomWindow): void {
         }
       });
 
-      // 3. 触发一次完整的、权威的重绘
       renderTasksForCurrentTab(true);
 
-      // 4. 与 BiliSelectScript 同步父视频卡片的选中状态
       if (window.BiliSelectScriptAPI) {
         affectedBvIds.forEach((bvIdToUpdate) => {
           const shouldBeSelectedInBili =
@@ -1526,7 +1522,6 @@ export function TaskSelectScript(window: CustomWindow): void {
         const taskId = item.dataset.taskId;
         if (!taskId || markedTaskIds.has(taskId)) return;
 
-        // 1. 获取当前和历史相交状态
         const wasPreviouslyIntersecting =
           lastIntersectionStatePerTask.get(taskId) ?? false;
         const itemRectVP = item.getBoundingClientRect();
@@ -1537,7 +1532,6 @@ export function TaskSelectScript(window: CustomWindow): void {
           itemRectVP.top > boxRectVP.bottom
         );
 
-        // 2. 检查是否穿越了边界 (状态是否改变)
         if (isCurrentlyIntersecting !== wasPreviouslyIntersecting) {
           // 穿越了边界，翻转预览状态
           if (previewSelectedTaskIds.has(taskId)) {
@@ -1545,11 +1539,26 @@ export function TaskSelectScript(window: CustomWindow): void {
           } else {
             previewSelectedTaskIds.add(taskId);
           }
-          // 直接更新DOM元素的class，提供即时视觉反馈
           item.classList.toggle("selected");
+
+          // --- START: 新增的实时同步逻辑 ---
+          const parentBvId = item.dataset.bv;
+          // 确保API存在且我们有有效的BV ID
+          if (parentBvId && window.BiliSelectScriptAPI) {
+            // 使用我们新增的辅助函数，检查父视频在【预览】状态下是否应被选中
+            const shouldParentBeSelected =
+              isAnyTaskSelectedForBvInPreview(parentBvId);
+
+            // 调用API，将这个实时的、计算出的状态同步到BiliSelectScript
+            window.BiliSelectScriptAPI.selectVideoCardByBv(
+              parentBvId,
+              shouldParentBeSelected,
+              true, // originatingFromTaskManager
+            );
+          }
+          // --- END: 新增的实时同步逻辑 ---
         }
 
-        // 3. 记录当前的相交状态，供下一次检查使用
         lastIntersectionStatePerTask.set(taskId, isCurrentlyIntersecting);
       });
     }
@@ -2378,7 +2387,22 @@ export function TaskSelectScript(window: CustomWindow): void {
   }
 
   // --- Helper Functions ---
-
+  /**
+   * 【新增】检查指定的 BV ID 在【预览选择集】中是否有任何子任务被选中。
+   * @param bvId The parent video's BV ID to check.
+   * @returns True if at least one child task is selected in the preview set.
+   */
+  function isAnyTaskSelectedForBvInPreview(bvId: string): boolean {
+    if (!bvId) return false;
+    // 遍历当前预览的选中任务ID集合
+    for (const taskId of previewSelectedTaskIds) {
+      const taskData = taskMap.get(taskId); // 使用 taskMap 进行高效查找
+      if (taskData && taskData.bv === bvId) {
+        return true; // 找到一个匹配项，立即返回true
+      }
+    }
+    return false; // 遍历完成，未找到匹配项
+  }
   // --- Initialization ---
   function init(): void {
     if (container) return; // Already initialized

@@ -1284,7 +1284,7 @@ export function TaskSelectScript(window: CustomWindow): void {
 
   // 文件: src/task-select.ts
 
-  function handleMouseDownTaskList(event: MouseEvent): void {
+  function handleMouseDownTaskList(event: PointerEvent): void {
     const target = event.target as HTMLElement;
     if (target.closest(".task-selector-task-item")) {
       return;
@@ -1300,6 +1300,19 @@ export function TaskSelectScript(window: CustomWindow): void {
     }
     event.preventDefault();
 
+    // --- START: 新增指针捕获逻辑 ---
+    try {
+      // 捕获鼠标指针，后续所有事件都将由 taskListContainer 处理
+      taskListContainer.setPointerCapture(event.pointerId);
+    } catch (error) {
+      // 捕获可能失败（例如在不支持的浏览器或环境中），但脚本应继续运行
+      console.warn(
+        "setPointerCapture failed, mouse may not be constrained.",
+        error,
+      );
+    }
+    // --- END: 新增指针捕获逻辑 ---
+
     // 总是创建全新的选择框
     taskListContainer.querySelector(".task-selection-box")?.remove();
     selectionBoxElement = document.createElement("div");
@@ -1308,11 +1321,8 @@ export function TaskSelectScript(window: CustomWindow): void {
 
     isSelectingBox = true;
 
-    // --- START: MODIFICATION ---
-    // 初始化新的状态
-    previewSelectedTaskIds = new Set(selectedTaskIds); // 将当前的选择状态复制到预览Set中
-    lastIntersectionStatePerTask.clear(); // 清空上一次的相交历史记录
-    // --- END: MODIFICATION ---
+    previewSelectedTaskIds = new Set(selectedTaskIds);
+    lastIntersectionStatePerTask.clear();
 
     selectionBoxStart = { x: event.clientX, y: event.clientY };
     lastClientX = event.clientX;
@@ -1322,42 +1332,75 @@ export function TaskSelectScript(window: CustomWindow): void {
     startContainerRect = containerRect;
 
     Object.assign(selectionBoxElement.style, { display: "block" });
-
-    document.addEventListener("mousemove", handleMouseMoveSelectBox, {
+    document.addEventListener("pointermove", handleMouseMoveSelectBox, {
       passive: false,
     });
-    document.addEventListener("mouseup", handleMouseUpSelectBox);
+    document.addEventListener("pointerup", handleMouseUpSelectBox);
+    // user-select: none 仍然是必要的，以防止文本被意外选中
     document.body.style.userSelect = "none";
 
     requestAnimationFrame(tickSelectionBox);
   }
 
-  function handleMouseMoveSelectBox(event: MouseEvent): void {
-    if (!isSelectingBox) return;
+  /**
+   * 【已重构】处理指针移动事件，包含坐标钳制逻辑。
+   * @param event The PointerEvent object.
+   */
+  function handleMouseMoveSelectBox(event: PointerEvent): void {
+    if (!isSelectingBox || !taskListContainer) return; // 增加对 taskListContainer 的检查
+
+    // 由于 passive: false，可以安全地调用 preventDefault
     event.preventDefault();
 
-    // 1. 仅更新最新的鼠标坐标
-    lastClientX = event.clientX;
-    lastClientY = event.clientY;
+    // --- START: 新增的坐标钳制逻辑 ---
 
-    // 2. 仅更新滚动方向信号
-    if (!taskListContainer) return;
-    const lr = taskListContainer.getBoundingClientRect();
+    // 1. 获取 taskListContainer 的当前边界矩形
+    const containerRect = taskListContainer.getBoundingClientRect();
+
+    // 2. 钳制 X 和 Y 坐标，确保它们不会超出容器的边界
+    const newClientX = Math.max(
+      containerRect.left,
+      Math.min(event.clientX, containerRect.right),
+    );
+    const newClientY = Math.max(
+      containerRect.top,
+      Math.min(event.clientY, containerRect.bottom),
+    );
+
+    // --- END: 新增的坐标钳制逻辑 ---
+
+    // 3. 仅更新最新的（可能已被钳制的）鼠标坐标
+    lastClientX = newClientX;
+    lastClientY = newClientY;
+
+    // 4. 更新滚动方向信号 (使用钳制后的坐标进行判断)
     let scrollDirection = 0;
-    if (lastClientY < lr.top + AUTO_SCROLL_ZONE_SIZE) {
-      scrollDirection = -1;
-    } else if (lastClientY > lr.bottom - AUTO_SCROLL_ZONE_SIZE) {
-      scrollDirection = 1;
+    if (lastClientY <= containerRect.top + AUTO_SCROLL_ZONE_SIZE) {
+      scrollDirection = -1; // 向上
+    } else if (lastClientY >= containerRect.bottom - AUTO_SCROLL_ZONE_SIZE) {
+      scrollDirection = 1; // 向下
     }
     autoScrollDirection = scrollDirection;
   }
 
   // 文件: src/task-select.ts
 
-  function handleMouseUpSelectBox(): void {
+  function handleMouseUpSelectBox(event: PointerEvent): void {
+    // <-- 接收 event 参数
     if (!isSelectingBox) {
       return;
     }
+
+    // --- START: 新增释放指针捕获逻辑 ---
+    if (taskListContainer) {
+      try {
+        // 释放对鼠标指针的捕获
+        taskListContainer.releasePointerCapture(event.pointerId);
+      } catch (error) {
+        console.warn("releasePointerCapture failed.", error);
+      }
+    }
+    // --- END: 新增释放指针捕获逻辑 ---
 
     // 停止主循环和滚动
     isSelectingBox = false;
@@ -1375,15 +1418,11 @@ export function TaskSelectScript(window: CustomWindow): void {
       // 彻底清理
       selectionBoxElement?.remove();
       selectionBoxElement = null;
-      document.removeEventListener("mousemove", handleMouseMoveSelectBox);
-      document.removeEventListener("mouseup", handleMouseUpSelectBox);
+      document.removeEventListener("pointermove", handleMouseMoveSelectBox);
+      document.removeEventListener("pointerup", handleMouseUpSelectBox);
       document.body.style.userSelect = "";
 
-      // --- START: MODIFICATION ---
-      // 清理新的状态变量
       lastIntersectionStatePerTask.clear();
-      // initialSelectedInTabForBoxOp.clear(); // <- 移除或注释掉
-      // --- END: MODIFICATION ---
 
       startContainerRect = null;
       startScrollTop = 0;
@@ -2423,7 +2462,7 @@ export function TaskSelectScript(window: CustomWindow): void {
       passive: true,
     });
     taskListContainer.addEventListener(
-      "mousedown",
+      "pointerdown", // <- 从 'mousedown' 改为 'pointerdown'
       handleMouseDownTaskList as EventListener,
     );
 

@@ -177,7 +177,11 @@ export function TaskSelectScript(window: CustomWindow): void {
   let isSelectingBox = false;
   let selectionBoxStart = { x: 0, y: 0 };
   let selectionBoxElement: HTMLDivElement | null = null;
-  let initialSelectedInTabForBoxOp = new Set<string>();
+  // 新增状态变量
+  let previewSelectedTaskIds = new Set<string>(); // <- 新增: 用于在拖拽期间管理预览选择状态
+  let lastIntersectionStatePerTask = new Map<string, boolean>(); // <- 新增: 记录每个任务的上一次相交状态
+  // --- END: MODIFICATION ---
+
   let progressWindows: Record<string, ProgressWindowData> = {};
   let progressWindowCounter = 0;
 
@@ -261,19 +265,60 @@ export function TaskSelectScript(window: CustomWindow): void {
   /**
    * 主视觉循环，在鼠标按下和松开之间持续运行。
    * 负责处理自动滚动和选择框的重绘。
+   * 【已修改】增加了向下滚动到底部任务时停止滚动的限制。
    */
   function tickSelectionBox(): void {
     // 如果鼠标已松开，则立即停止循环
     if (!isSelectingBox) return;
 
-    // 1. 如果需要，执行自动滚动 (这会改变 scrollTop)
+    // --- START: 新增的滚动限制逻辑 ---
+    let canScrollDown = true;
+
+    // 仅在尝试向下滚动时进行检查
+    if (autoScrollDirection > 0 && taskListContainer && selectionBoxElement) {
+      const state = currentTabId ? tabStates[currentTabId] : null;
+      const flatItems = state?.flatListCache;
+
+      // 确保我们有扁平化的任务列表缓存可以参考
+      if (flatItems && flatItems.length > 0) {
+        // 1. 获取最后一个任务的信息
+        const lastTaskItem = flatItems[flatItems.length - 1];
+        // 2. 计算最后一个任务在可滚动内容区域内的底部Y坐标
+        const lastTaskBottomY = lastTaskItem.top + lastTaskItem.height;
+
+        // 3. 计算选择框在可滚动内容区域内的底部Y坐标
+        //    (selectionBoxElement的offsetTop和offsetHeight是相对于其父容器taskListContainer的)
+        const selectionBoxBottomY =
+          selectionBoxElement.offsetTop + selectionBoxElement.offsetHeight;
+
+        // 4. 如果选择框的底部已经到达或超过了最后一个任务的底部，则禁止继续向下滚动
+        if (selectionBoxBottomY >= lastTaskBottomY) {
+          canScrollDown = false;
+
+          // (可选但推荐的优化) 将滚动条精确定位到刚好完全显示最后一个任务的位置
+          const containerHeight = taskListContainer.clientHeight;
+          const targetScrollTop = lastTaskBottomY - containerHeight + 5; // +5px的底部间距
+          // 只有当当前滚动位置小于目标位置时才设置，避免向上跳动
+          if (taskListContainer.scrollTop < targetScrollTop) {
+            taskListContainer.scrollTop = targetScrollTop;
+          }
+        }
+      }
+    }
+    // --- END: 新增的滚动限制逻辑 ---
+
+    // 1. 如果需要，执行自动滚动 (现在会检查 canScrollDown)
     if (autoScrollDirection !== 0 && taskListContainer) {
-      taskListContainer.scrollTop +=
-        AUTO_SCROLL_SPEED_MAX * autoScrollDirection;
+      if (autoScrollDirection > 0 && !canScrollDown) {
+        // 如果是向下滚动但已被禁止，则不执行任何操作
+      } else {
+        // 向上滚动或允许的向下滚动
+        taskListContainer.scrollTop +=
+          AUTO_SCROLL_SPEED_MAX * autoScrollDirection;
+      }
     }
 
     // 2. 【关键】在每次循环（包括滚动后），都调用绘制函数来重绘选择框。
-    //    updateSelectionBoxVisuals 内部已经处理了坐标转换。
     updateSelectionBoxVisuals();
 
     // 3. 根据重绘后的选择框，更新任务的“预览”高亮状态
@@ -282,6 +327,7 @@ export function TaskSelectScript(window: CustomWindow): void {
     // 4. 请求下一帧，以平滑地继续循环
     requestAnimationFrame(tickSelectionBox);
   }
+
   /**
    * Creates a generic drag handler for an element.
    * @param options - Configuration for the drag behavior.
@@ -814,6 +860,8 @@ export function TaskSelectScript(window: CustomWindow): void {
     return pItem; // Return the element directly
   }
 
+  // 文件: src/task-select.ts
+
   function createChildTaskNode(
     task: Task,
     parentBvId: string,
@@ -829,14 +877,24 @@ export function TaskSelectScript(window: CustomWindow): void {
     i.style.height = `${CHILD_TASK_ITEM_HEIGHT}px`; // Set fixed height
     i.style.marginLeft = "20px"; // Indent child tasks
 
-    // NEW conditions
+    // --- START: MODIFICATION ---
     if (markedTaskIds.has(task.id)) {
+      // 已确认的任务具有最高优先级
       i.classList.add("marked");
-    } else if (selectedTaskIds.has(task.id)) {
-      i.classList.add("selected");
+    } else if (isSelectingBox) {
+      // 如果正在框选预览，则从 `previewSelectedTaskIds` 获取状态
+      if (previewSelectedTaskIds.has(task.id)) {
+        i.classList.add("selected");
+      }
+    } else {
+      // 正常模式下，从核心 `selectedTaskIds` 获取状态
+      if (selectedTaskIds.has(task.id)) {
+        i.classList.add("selected");
+      }
     }
+    // --- END: MODIFICATION ---
 
-    i.addEventListener("click", handleChildTaskClick as EventListener); // New handler
+    i.addEventListener("click", handleChildTaskClick as EventListener);
     i.setAttribute("draggable", "false");
     return i;
   }
@@ -1224,6 +1282,8 @@ export function TaskSelectScript(window: CustomWindow): void {
     windowState.collapsed = sCollapse;
   }
 
+  // 文件: src/task-select.ts
+
   function handleMouseDownTaskList(event: MouseEvent): void {
     const target = event.target as HTMLElement;
     if (target.closest(".task-selector-task-item")) {
@@ -1247,15 +1307,19 @@ export function TaskSelectScript(window: CustomWindow): void {
     taskListContainer.appendChild(selectionBoxElement);
 
     isSelectingBox = true;
-    initialSelectedInTabForBoxOp = new Set(selectedTaskIds);
+
+    // --- START: MODIFICATION ---
+    // 初始化新的状态
+    previewSelectedTaskIds = new Set(selectedTaskIds); // 将当前的选择状态复制到预览Set中
+    lastIntersectionStatePerTask.clear(); // 清空上一次的相交历史记录
+    // --- END: MODIFICATION ---
+
     selectionBoxStart = { x: event.clientX, y: event.clientY };
     lastClientX = event.clientX;
     lastClientY = event.clientY;
 
-    // --- 【关键】捕获初始状态以锚定坐标系 ---
     startScrollTop = taskListContainer.scrollTop;
-    startContainerRect = containerRect; // 直接使用上面获取的 containerRect
-    // --- 结束关键修改 ---
+    startContainerRect = containerRect;
 
     Object.assign(selectionBoxElement.style, { display: "block" });
 
@@ -1288,6 +1352,8 @@ export function TaskSelectScript(window: CustomWindow): void {
     autoScrollDirection = scrollDirection;
   }
 
+  // 文件: src/task-select.ts
+
   function handleMouseUpSelectBox(): void {
     if (!isSelectingBox) {
       return;
@@ -1312,8 +1378,13 @@ export function TaskSelectScript(window: CustomWindow): void {
       document.removeEventListener("mousemove", handleMouseMoveSelectBox);
       document.removeEventListener("mouseup", handleMouseUpSelectBox);
       document.body.style.userSelect = "";
-      initialSelectedInTabForBoxOp.clear();
-      // --- 新增清理 ---
+
+      // --- START: MODIFICATION ---
+      // 清理新的状态变量
+      lastIntersectionStatePerTask.clear();
+      // initialSelectedInTabForBoxOp.clear(); // <- 移除或注释掉
+      // --- END: MODIFICATION ---
+
       startContainerRect = null;
       startScrollTop = 0;
     }
@@ -1364,69 +1435,38 @@ export function TaskSelectScript(window: CustomWindow): void {
   // The original `findTaskByIdGlobal` might have been looking for what are now parent tasks by their 'id' (which was BV).
   // Now, selection is by CID.
 
+  /**
+   * 【已重构】根据选择框的位置，更新子任务的选中状态。
+   * 采用“边界穿越”模式：当选框边缘每次穿过任务边界时，翻转其选中状态。
+   * @param {boolean} isFinal - 在mouseup时为true，用于将预览状态提交到核心数据。
+   */
   function updateSelectionFromBox(isFinal: boolean = false): void {
     if (!selectionBoxElement || !taskListContainer) return;
 
-    const boxRectVP = selectionBoxElement.getBoundingClientRect();
-    const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
-      ".task-selector-child-task",
-    );
-    if (childTaskItems.length === 0 && !isFinal) return; // 拖拽中如果没有item，就没必要继续
-
-    const bvsAffected = new Set<string>();
-
     if (isFinal) {
-      // --- 提交模式 (isFinal = true, 在 mouseup 时调用) ---
-      // 遍历所有子任务的 DOM 节点来确定最终选择
-      const allRenderedItems =
-        taskListContainer.querySelectorAll<HTMLDivElement>(
-          ".task-selector-child-task",
-        );
-      allRenderedItems.forEach((item) => {
-        const childTaskId = item.dataset.taskId;
-        if (childTaskId) {
-          // 如果这个节点当前有 'selected' 类，就确保它在最终的 Set 里
-          if (item.classList.contains("selected")) {
-            selectedTaskIds.add(childTaskId);
-          } else {
-            selectedTaskIds.delete(childTaskId);
-          }
-          if (item.dataset.bv) bvsAffected.add(item.dataset.bv);
+      // --- 模式一：最终提交 (在 mouseup 时调用) ---
+
+      // 1. 将预览选择状态正式应用到核心选择状态
+      const oldSelectedIds = selectedTaskIds;
+      selectedTaskIds = previewSelectedTaskIds;
+      previewSelectedTaskIds = new Set(); // 清空预览，以备后用
+
+      // 2. 收集所有受影响的父视频BV ID，以便同步UI
+      const affectedBvIds = new Set<string>();
+      const allInvolvedIds = new Set([...oldSelectedIds, ...selectedTaskIds]);
+      allInvolvedIds.forEach((id) => {
+        const task = findChildTaskByIdGlobal(id);
+        if (task) {
+          affectedBvIds.add(task.bv);
         }
       });
-    } else {
-      // --- 预览模式 (isFinal = false, 在拖拽中持续调用) ---
-      // 只操作当前可见元素的 class，提供实时视觉反馈
-      childTaskItems.forEach((item) => {
-        const itemRectVP = item.getBoundingClientRect();
-        const childTaskId = item.dataset.taskId;
 
-        if (!childTaskId || markedTaskIds.has(childTaskId)) return;
-
-        const overlaps = !(
-          itemRectVP.right < boxRectVP.left ||
-          itemRectVP.left > boxRectVP.right ||
-          itemRectVP.bottom < boxRectVP.top ||
-          itemRectVP.top > boxRectVP.bottom
-        );
-
-        const wasInitiallySelected =
-          initialSelectedInTabForBoxOp.has(childTaskId);
-        let shouldBeSelectedNow = wasInitiallySelected;
-        if (overlaps) {
-          shouldBeSelectedNow = !wasInitiallySelected;
-        }
-        item.classList.toggle("selected", shouldBeSelectedNow);
-      });
-    }
-
-    if (isFinal) {
-      // 在提交数据后，进行一次最终的、权威的重绘
+      // 3. 触发一次完整的、权威的重绘
       renderTasksForCurrentTab(true);
 
-      // 并同步BiliSelectScript的状态
+      // 4. 与 BiliSelectScript 同步父视频卡片的选中状态
       if (window.BiliSelectScriptAPI) {
-        bvsAffected.forEach((bvIdToUpdate) => {
+        affectedBvIds.forEach((bvIdToUpdate) => {
           const shouldBeSelectedInBili =
             TaskSelectorManager.isAnyTaskSelectedForBv(bvIdToUpdate);
           window.BiliSelectScriptAPI!.selectVideoCardByBv(
@@ -1436,9 +1476,45 @@ export function TaskSelectScript(window: CustomWindow): void {
           );
         });
       }
+    } else {
+      // --- 模式二：实时预览 (在拖拽过程中持续调用) ---
+      const boxRectVP = selectionBoxElement.getBoundingClientRect();
+      const childTaskItems = taskListContainer.querySelectorAll<HTMLDivElement>(
+        ".task-selector-child-task",
+      );
+
+      childTaskItems.forEach((item) => {
+        const taskId = item.dataset.taskId;
+        if (!taskId || markedTaskIds.has(taskId)) return;
+
+        // 1. 获取当前和历史相交状态
+        const wasPreviouslyIntersecting =
+          lastIntersectionStatePerTask.get(taskId) ?? false;
+        const itemRectVP = item.getBoundingClientRect();
+        const isCurrentlyIntersecting = !(
+          itemRectVP.right < boxRectVP.left ||
+          itemRectVP.left > boxRectVP.right ||
+          itemRectVP.bottom < boxRectVP.top ||
+          itemRectVP.top > boxRectVP.bottom
+        );
+
+        // 2. 检查是否穿越了边界 (状态是否改变)
+        if (isCurrentlyIntersecting !== wasPreviouslyIntersecting) {
+          // 穿越了边界，翻转预览状态
+          if (previewSelectedTaskIds.has(taskId)) {
+            previewSelectedTaskIds.delete(taskId);
+          } else {
+            previewSelectedTaskIds.add(taskId);
+          }
+          // 直接更新DOM元素的class，提供即时视觉反馈
+          item.classList.toggle("selected");
+        }
+
+        // 3. 记录当前的相交状态，供下一次检查使用
+        lastIntersectionStatePerTask.set(taskId, isCurrentlyIntersecting);
+      });
     }
   }
-
   // src/task-select.ts
 
   function handleTaskListScroll(): void {
@@ -2605,7 +2681,6 @@ export function TaskSelectScript(window: CustomWindow): void {
       progressWindowCounter = 0;
       isSelectingBox = false;
       selectionBoxStart = { x: 0, y: 0 };
-      initialSelectedInTabForBoxOp = new Set();
       tickScheduled = false;
 
       // 5. Nullify DOM element references to help garbage collection.

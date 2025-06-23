@@ -274,24 +274,39 @@ export function BiliSelectScript(
       if (changed) logState("Selection updated via drag");
     } else {
       // --- 预览模式 (isFinal = false) ---
+      // MODIFICATION START: Real-time sync with TaskSelectorManager
       cards.forEach((card) => {
+        const bvId = getBvId(card);
+        if (!bvId) return;
+
+        // 1. 计算此卡片在本次拖拽操作中的“期望”选中状态
+        let shouldBeSelectedNow: boolean;
         if (isIntersecting(card, rectBounds)) {
-          const bvId = getBvId(card);
-          if (bvId && initialSelectedInDragOp.has(bvId)) {
-            removeSelectedStyle(card); // 初始选中的，在框内变为不选中
-          } else {
-            addSelectedStyle(card); // 初始不选中的，在框内变为选中
-          }
+          // 在框选矩形内，状态与初始状态相反
+          shouldBeSelectedNow = !initialSelectedInDragOp.has(bvId);
         } else {
-          // 不在框内，恢复为初始状态
-          const bvId = getBvId(card);
-          if (bvId && initialSelectedInDragOp.has(bvId)) {
-            addSelectedStyle(card);
-          } else {
-            removeSelectedStyle(card);
-          }
+          // 在框选矩形外，状态恢复为初始状态
+          shouldBeSelectedNow = initialSelectedInDragOp.has(bvId);
+        }
+
+        // 2. 更新此卡片的视觉样式
+        if (shouldBeSelectedNow) {
+          addSelectedStyle(card);
+        } else {
+          removeSelectedStyle(card);
+        }
+
+        // 3. 【关键】将此“期望”状态实时同步到 TaskSelectorManager
+        if (window.TaskSelectorManager) {
+          // `true` 表示这个选择状态的改变源自 BiliSelectScript
+          window.TaskSelectorManager.selectTasksByBv(
+            bvId,
+            shouldBeSelectedNow,
+            true,
+          );
         }
       });
+      // MODIFICATION END
     }
   }
 

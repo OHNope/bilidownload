@@ -1,4 +1,4 @@
-import { CustomWindow, TaskSelectorManagerAPI } from "../types";
+import { TaskSelectorManagerAPI } from "../types";
 import { download } from "./download";
 import { updateTaskStateById } from "./utils";
 import { states } from "./states";

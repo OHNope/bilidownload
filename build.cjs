@@ -36,16 +36,25 @@ async function build() {
 
     // 2. 调用 tsc 生成 .d.ts 文件 (在 tsconfig.json 中配置)
     // 这个命令现在是构建流程中唯一生成类型的地方
+    console.log("⏳ Generating TypeScript declarations...");
+    console.time("d.ts generation"); // <--- 开始计时
+
     exec("tsc --emitDeclarationOnly", (error, stdout, stderr) => {
       if (error) {
         console.error(`❌ tsc build failed: ${error.message}`);
+        // 打印 stderr 帮助调试
+        if (stderr) {
+          console.error(`stderr: ${stderr}`);
+        }
+        console.timeEnd("d.ts generation"); // <--- 在失败时也结束计时
         return;
       }
+      // tsc 可能会在成功时向 stderr 输出警告，所以只作为警告打印
       if (stderr) {
-        console.error(`❌ tsc stderr: ${stderr}`);
-        return;
+        console.warn(`tsc stderr (may contain warnings): ${stderr}`);
       }
       console.log("✅ TypeScript declaration files generated.");
+      console.timeEnd("d.ts generation"); // <--- 在成功时结束计时并打印时间
     });
   } catch (e) {
     console.error("❌ Build failed:", e);

@@ -368,13 +368,7 @@ export function BiliSelectScript(initialMediaId: string): void {
         const folderName =
           unsafeWindow.folders?.get(currentMediaId) || "Unknown Folder";
         // Pass true for the new parameter
-        addSingleVideo(
-          String(currentMediaId),
-          folderName,
-          bvId!,
-          unsafeWindow,
-          true,
-        );
+        addSingleVideo(String(currentMediaId), folderName, bvId!, true);
       }
     }
 
@@ -887,7 +881,7 @@ export function BiliSelectScript(initialMediaId: string): void {
           String(currentMediaId),
           folderName,
           selectedBvId,
-          unsafeWindow,
+
           true,
         );
         unsafeWindow.TaskSelectorManager!.selectTasksByBv(

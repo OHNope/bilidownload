@@ -3,3 +3,4 @@ dist
 node_modules
 test.ts
 src.zip
+.DS_Store

@@ -1,5 +1,3 @@
-import { CustomWindow } from "./types";
-
 interface GmFetchOptions {
   method?: "GET" | "POST" | "HEAD";
   url: string;
@@ -44,7 +42,6 @@ export async function addSingleVideo(
   tabId: string, // media_id from BiliSelectScript
   tabName: string, // folder name from BiliSelectScript
   bvId: string,
-  window: CustomWindow,
   autoSelectChildren: boolean = false,
 ): Promise<void> {
   const LOG_PREFIX_ASV = "[AddSingleVideo]";
@@ -86,13 +83,13 @@ export async function addSingleVideo(
       return;
     }
 
-    if (window.TaskSelectorManager) {
+    if (unsafeWindow.TaskSelectorManager) {
       const parentTaskInput = {
         videoTitle: videoTitle,
         bvId: bvId,
         pages: pages,
       };
-      window.TaskSelectorManager.addTaskData(
+      unsafeWindow.TaskSelectorManager.addTaskData(
         tabId,
         tabName,
         [parentTaskInput],

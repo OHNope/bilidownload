@@ -39,7 +39,7 @@ async function build() {
     console.log("⏳ Generating TypeScript declarations...");
     console.time("d.ts generation"); // <--- 开始计时
 
-    exec("tsc --emitDeclarationOnly", (error, stdout, stderr) => {
+    exec("tsc --emitDeclarationOnly", (error, _stdout, stderr) => {
       if (error) {
         console.error(`❌ tsc build failed: ${error.message}`);
         // 打印 stderr 帮助调试

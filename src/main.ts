@@ -129,9 +129,9 @@ function extractKeysFromFirstContainer(
       console.log(`${LOG_PREFIX_MAIN} Video page detected, BV: ${bvId}`);
       // Add the video to a default tab in the Task Selector
       extractKeysFromFirstContainer(unsafeWindow.document).forEach((ele) => {
-        addSingleVideo("default", "视频页", ele, unsafeWindow);
+        addSingleVideo("default", "视频页", ele);
       });
-      addSingleVideo("default", "视频页", bvId, unsafeWindow);
+      addSingleVideo("default", "视频页", bvId);
     } else {
       console.log(
         `${LOG_PREFIX_MAIN} Video page detected, but could not extract BV ID.`,

@@ -52,7 +52,7 @@ export interface WindowUiState {
 }
 
 // MODIFIED
-export type TaskDownloadStatus =
+type TaskDownloadStatus =
   | "pending"
   | "downloading"
   | "retrying"

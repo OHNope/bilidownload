@@ -9,7 +9,6 @@
     "declarationDir": "dist/types", // .d.ts 文件的输出目录
     // "outDir": "dist/js",         // esbuild 负责 JS 输出，tsc 负责 types 输出，所以这里不冲突
     "rootDir": "src", // 源文件根目录
-    "jsx": "react", // 如果使用 React
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

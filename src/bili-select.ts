@@ -1,4 +1,4 @@
-import { CustomWindow, BiliSelectScriptAPI_Interface } from "./types";
+import { BiliSelectScriptAPI_Interface } from "./types";
 import { addSingleVideo } from "./utils";
 
 export function BiliSelectScript(initialMediaId: string): void {

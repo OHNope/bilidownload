@@ -151,10 +151,6 @@ export function BiliSelectScript(
   const AUTO_SCROLL_ZONE_SIZE = 60; // 页面边缘触发滚动的区域大小 (px)
   const AUTO_SCROLL_SPEED_MAX = 20; // 页面滚动的最大速度
   // --- 结束新增 ---
-  let startX = 0,
-    startY = 0;
-  let endX = 0,
-    endY = 0;
 
   function log(...args: any[]): void {
     console.log(LOG_PREFIX, ...args);
@@ -369,22 +365,6 @@ export function BiliSelectScript(
       );
       window.TaskSelectorManager.selectTasksByBv(bvId, isNowSelected, true);
     }
-  }
-
-  function updateSelectionRect(): void {
-    if (!selectionRectElement) {
-      selectionRectElement = document.createElement("div");
-      selectionRectElement.id = SELECTION_RECT_ID;
-      document.body.appendChild(selectionRectElement);
-    }
-    const x = Math.min(startX, endX);
-    const y = Math.min(startY, endY);
-    const width = Math.abs(endX - startX);
-    const height = Math.abs(endY - startY);
-    selectionRectElement.style.left = `${x}px`;
-    selectionRectElement.style.top = `${y}px`;
-    selectionRectElement.style.width = `${width}px`;
-    selectionRectElement.style.height = `${height}px`;
   }
 
   function isIntersecting(

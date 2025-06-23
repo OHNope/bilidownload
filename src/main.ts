@@ -1,5 +1,5 @@
 import { CustomWindow } from "./types";
-import { TaskSelectScript } from "./task-select";
+import { TaskSelectScript } from "./task-select/index";
 import { BiliSelectScript } from "./bili-select";
 import { gmFetch, addSingleVideo } from "./utils";
 

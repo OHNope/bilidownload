@@ -57,4 +57,7 @@ interface GmXhrHandle {
 // REPLACE THE OLD DECLARATION WITH THIS CORRECTED ONE
 declare global {
   const GM_xmlhttpRequest: (details: any) => GmXhrHandle;
+  const unsafeWindow: CustomWindow;
 }
+
+export {};

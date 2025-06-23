@@ -1,9 +1,6 @@
-import { CustomWindow } from "./types";
 import { TaskSelectScript } from "./task-select/index";
 import { BiliSelectScript } from "./bili-select";
 import { gmFetch, addSingleVideo } from "./utils";
-
-declare const unsafeWindow: CustomWindow;
 
 // CSS Selectors
 const CONTAINER_SELECTOR = "div.video-pod__list.section";
@@ -66,8 +63,8 @@ function extractKeysFromFirstContainer(
   return dataKeys;
 }
 
-(async (unsafeWin: CustomWindow) => {
-  // Type unsafeWin as CustomWindow directly
+(async () => {
+  // Type unsafeWindow as CustomWindow directly
   "use strict";
   const LOG_PREFIX_MAIN = "[BiliBiliDownload Main]";
   const FAVLIST_URL_PATTERN =
@@ -75,7 +72,7 @@ function extractKeysFromFirstContainer(
   const VIDEO_PATTERN =
     /^https:\/\/www\.bilibili\.com\/video\/BV([a-zA-Z0-9]+)\/?.*?$/;
 
-  const url = unsafeWin.location.href;
+  const url = unsafeWindow.location.href;
   const MatchFavlist = url.match(FAVLIST_URL_PATTERN);
   const MatchVideo = url.match(VIDEO_PATTERN);
 
@@ -84,10 +81,10 @@ function extractKeysFromFirstContainer(
   console.log(`${LOG_PREFIX_MAIN} Video Match:`, MatchVideo);
 
   // Initialize the Task Selector UI first, so other scripts can interact with it.
-  TaskSelectScript(unsafeWin);
+  TaskSelectScript();
 
   if (MatchFavlist && MatchFavlist[1] && MatchFavlist[2]) {
-    unsafeWin.folders = new Map<string, string>();
+    unsafeWindow.folders = new Map<string, string>();
     const upMid = MatchFavlist[1];
     const fid = MatchFavlist[2];
     console.log(`${LOG_PREFIX_MAIN} Fetching folders for up_mid: ${upMid}`);
@@ -104,9 +101,9 @@ function extractKeysFromFirstContainer(
 
       if (json && json.data && json.data.list) {
         json.data.list.forEach((folder: any) => {
-          unsafeWin.folders!.set(String(folder.id), String(folder.title));
+          unsafeWindow.folders!.set(String(folder.id), String(folder.title));
         });
-        console.log(`${LOG_PREFIX_MAIN} Folders loaded:`, unsafeWin.folders);
+        console.log(`${LOG_PREFIX_MAIN} Folders loaded:`, unsafeWindow.folders);
       } else {
         console.error(
           `${LOG_PREFIX_MAIN} Unexpected folder API response format:`,
@@ -118,7 +115,7 @@ function extractKeysFromFirstContainer(
     }
 
     // Initialize the BiliSelect script after getting the folders
-    BiliSelectScript(fid, unsafeWin);
+    BiliSelectScript(fid);
   } else if (MatchVideo && MatchVideo[1]) {
     let bvId = MatchVideo[1]; // The BV ID from the URL path
     if (!bvId) {
@@ -131,10 +128,10 @@ function extractKeysFromFirstContainer(
     if (bvId) {
       console.log(`${LOG_PREFIX_MAIN} Video page detected, BV: ${bvId}`);
       // Add the video to a default tab in the Task Selector
-      extractKeysFromFirstContainer(unsafeWin.document).forEach((ele) => {
-        addSingleVideo("default", "视频页", ele, unsafeWin);
+      extractKeysFromFirstContainer(unsafeWindow.document).forEach((ele) => {
+        addSingleVideo("default", "视频页", ele, unsafeWindow);
       });
-      addSingleVideo("default", "视频页", bvId, unsafeWin);
+      addSingleVideo("default", "视频页", bvId, unsafeWindow);
     } else {
       console.log(
         `${LOG_PREFIX_MAIN} Video page detected, but could not extract BV ID.`,
@@ -145,4 +142,4 @@ function extractKeysFromFirstContainer(
       `${LOG_PREFIX_MAIN} Not on a matching favlist or video page. Script is idle.`,
     );
   }
-})(unsafeWindow as CustomWindow);
+})();

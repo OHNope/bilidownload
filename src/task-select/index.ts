@@ -12,13 +12,13 @@ import {
   ProgressTaskItem,
 } from "./types";
 
-export function TaskSelectScript(window: CustomWindow): void {
+export function TaskSelectScript(): void {
   // --- 防止重复注入 ---
-  if (window.TaskSelectorManager) {
+  if (unsafeWindow.TaskSelectorManager) {
     console.log(
       "Task Selector Manager already injected. Destroying previous instance.",
     );
-    window.TaskSelectorManager.destroy?.();
+    unsafeWindow.TaskSelectorManager.destroy?.();
   }
   // --- 工具函数 ---
   function debounce<T extends (...args: any[]) => void>(
@@ -32,7 +32,7 @@ export function TaskSelectScript(window: CustomWindow): void {
         func(...args);
       };
       clearTimeout(timeout);
-      timeout = window.setTimeout(later, wait);
+      timeout = unsafeWindow.setTimeout(later, wait);
     };
   }
 
@@ -133,11 +133,14 @@ export function TaskSelectScript(window: CustomWindow): void {
       let newLeft = event.clientX - dragOffset.x;
       newTop = Math.max(
         0,
-        Math.min(newTop, window.innerHeight - movableElement.offsetHeight),
+        Math.min(
+          newTop,
+          unsafeWindow.innerHeight - movableElement.offsetHeight,
+        ),
       );
       newLeft = Math.max(
         0,
-        Math.min(newLeft, window.innerWidth - movableElement.offsetWidth),
+        Math.min(newLeft, unsafeWindow.innerWidth - movableElement.offsetWidth),
       );
       movableElement.style.top = `${newTop}px`;
       movableElement.style.left = `${newLeft}px`;
@@ -285,7 +288,7 @@ export function TaskSelectScript(window: CustomWindow): void {
       .task-selection-box { position: absolute; border: 1px dashed #007bff; background-color: rgba(0, 123, 255, 0.1); z-index: 10000; pointer-events: none; }
       .task-selector-resizer { position: absolute; width: 12px; height: 12px; right: 0; bottom: 0; cursor: nwse-resize; z-index: 10; user-select: none; -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; }
       .task-selector-container.collapsed .task-selector-resizer { display: none; }
-      .task-progress-window { position: fixed; z-index: 9998; background-color: rgba(255, 255, 255, 0.98); border: 1px solid #bbb; box-shadow: 0 3px 9px rgba(0,0,0,0.15); display: flex; flex-direction: column; overflow: hidden; user-select: none; color: #333; font-family: sans-serif; min-width: 200px; min-height: 100px; }
+      .task-progress-unsafeWindow { position: fixed; z-index: 9998; background-color: rgba(255, 255, 255, 0.98); border: 1px solid #bbb; box-shadow: 0 3px 9px rgba(0,0,0,0.15); display: flex; flex-direction: column; overflow: hidden; user-select: none; color: #333; font-family: sans-serif; min-width: 200px; min-height: 100px; }
       .task-progress-header { padding: 5px 8px; background-color: #f0f0f0; cursor: grab; border-bottom: 1px solid #ccc; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; min-height: 26px; }
       .task-progress-header:active { cursor: grabbing; }
       .task-progress-title { font-weight: bold; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 10px; }
@@ -829,10 +832,10 @@ export function TaskSelectScript(window: CustomWindow): void {
       states.selectedTaskIds.add(childTaskId);
       targetItem.classList.add("selected");
     }
-    if (window.BiliSelectScriptAPI) {
+    if (unsafeWindow.BiliSelectScriptAPI) {
       const anyChildStillSelected =
         TaskSelectorManager.isAnyTaskSelectedForBv(parentBvId);
-      window.BiliSelectScriptAPI.selectVideoCardByBv(
+      unsafeWindow.BiliSelectScriptAPI.selectVideoCardByBv(
         parentBvId,
         anyChildStillSelected,
         true,
@@ -862,11 +865,11 @@ export function TaskSelectScript(window: CustomWindow): void {
         if (task) affectedBvIds.add(task.bv);
       });
       renderTasksForCurrentTab(true);
-      if (window.BiliSelectScriptAPI) {
+      if (unsafeWindow.BiliSelectScriptAPI) {
         affectedBvIds.forEach((bvIdToUpdate) => {
           const shouldBeSelectedInBili =
             TaskSelectorManager.isAnyTaskSelectedForBv(bvIdToUpdate);
-          window.BiliSelectScriptAPI!.selectVideoCardByBv(
+          unsafeWindow.BiliSelectScriptAPI!.selectVideoCardByBv(
             bvIdToUpdate,
             shouldBeSelectedInBili,
             true,
@@ -899,10 +902,10 @@ export function TaskSelectScript(window: CustomWindow): void {
           }
           item.classList.toggle("selected");
           const parentBvId = item.dataset.bv;
-          if (parentBvId && window.BiliSelectScriptAPI) {
+          if (parentBvId && unsafeWindow.BiliSelectScriptAPI) {
             const shouldParentBeSelected =
               isAnyTaskSelectedForBvInPreview(parentBvId);
-            window.BiliSelectScriptAPI.selectVideoCardByBv(
+            unsafeWindow.BiliSelectScriptAPI.selectVideoCardByBv(
               parentBvId,
               shouldParentBeSelected,
               true,
@@ -1003,9 +1006,9 @@ export function TaskSelectScript(window: CustomWindow): void {
     });
     if (changed) {
       renderTasksForCurrentTab(true);
-      if (window.BiliSelectScriptAPI) {
+      if (unsafeWindow.BiliSelectScriptAPI) {
         affectedBvIds.forEach((bvId) => {
-          window.BiliSelectScriptAPI!.selectVideoCardByBv(
+          unsafeWindow.BiliSelectScriptAPI!.selectVideoCardByBv(
             bvId,
             TaskSelectorManager.isAnyTaskSelectedForBv(bvId),
             true,
@@ -1047,9 +1050,13 @@ export function TaskSelectScript(window: CustomWindow): void {
     }
     states.selectedTaskIds.clear();
     renderTasksForCurrentTab(true);
-    if (window.BiliSelectScriptAPI) {
+    if (unsafeWindow.BiliSelectScriptAPI) {
       bvsToUpdate.forEach((bvId) =>
-        window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, false, true),
+        unsafeWindow.BiliSelectScriptAPI!.selectVideoCardByBv(
+          bvId,
+          false,
+          true,
+        ),
       );
     }
   }
@@ -1075,9 +1082,13 @@ export function TaskSelectScript(window: CustomWindow): void {
     });
     if (changed) {
       renderTasksForCurrentTab(true);
-      if (window.BiliSelectScriptAPI) {
+      if (unsafeWindow.BiliSelectScriptAPI) {
         bvsToUpdate.forEach((bvId) =>
-          window.BiliSelectScriptAPI!.selectVideoCardByBv(bvId, true, true),
+          unsafeWindow.BiliSelectScriptAPI!.selectVideoCardByBv(
+            bvId,
+            true,
+            true,
+          ),
         );
       }
     }
@@ -1085,7 +1096,7 @@ export function TaskSelectScript(window: CustomWindow): void {
 
   function createProgressWindow(tasksForWindow: SelectedTask[]): string {
     states.progressWindowCounter++;
-    const windowId = `progress-window-${states.progressWindowCounter}`;
+    const windowId = `progress-unsafeWindow-${states.progressWindowCounter}`;
     const preparedTasks: ProgressTaskItem[] = tasksForWindow.map((t) => ({
       ...t,
       progress: 0,
@@ -1104,7 +1115,7 @@ export function TaskSelectScript(window: CustomWindow): void {
     };
     const pwC = document.createElement("div");
     pwC.id = windowId;
-    pwC.className = "task-progress-window";
+    pwC.className = "task-progress-unsafeWindow";
     Object.assign(pwC.style, {
       top: state.top,
       left: state.left,
@@ -1418,13 +1429,13 @@ export function TaskSelectScript(window: CustomWindow): void {
       renderTasksForCurrentTab(true);
     const onlineHandler = handleConnectionRestored as EventListener,
       offlineHandler = handleConnectionLost as EventListener;
-    window.addEventListener("online", onlineHandler);
-    window.addEventListener("offline", offlineHandler);
+    unsafeWindow.addEventListener("online", onlineHandler);
+    unsafeWindow.addEventListener("offline", offlineHandler);
     states.globalCleanupFunctions.push(() =>
-      window.removeEventListener("online", onlineHandler),
+      unsafeWindow.removeEventListener("online", onlineHandler),
     );
     states.globalCleanupFunctions.push(() =>
-      window.removeEventListener("offline", offlineHandler),
+      unsafeWindow.removeEventListener("offline", offlineHandler),
     );
   }
 
@@ -1549,7 +1560,7 @@ export function TaskSelectScript(window: CustomWindow): void {
       states.buttonsContainer = null;
       states.collapseIndicator = null;
       states.selectionBoxElement = null;
-      delete window.TaskSelectorManager;
+      delete unsafeWindow.TaskSelectorManager;
     },
     selectTasksByBv: (bvId, shouldSelect) => {
       if (!bvId) return;
@@ -1595,7 +1606,7 @@ export function TaskSelectScript(window: CustomWindow): void {
     },
   };
 
-  window.TaskSelectorManager = TaskSelectorManager;
+  unsafeWindow.TaskSelectorManager = TaskSelectorManager;
 
   function attemptInit() {
     if (document.body) {

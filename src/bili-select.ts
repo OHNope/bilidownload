@@ -1,10 +1,7 @@
 import { CustomWindow, BiliSelectScriptAPI_Interface } from "./types";
 import { addSingleVideo } from "./utils";
 
-export function BiliSelectScript(
-  initialMediaId: string,
-  window: CustomWindow,
-): void {
+export function BiliSelectScript(initialMediaId: string): void {
   "use strict";
 
   const LOG_PREFIX = "[BiliSelectScript V3]";
@@ -122,7 +119,7 @@ export function BiliSelectScript(
         : false;
     },
   };
-  window.BiliSelectScriptAPI = BiliSelectScriptAPI;
+  unsafeWindow.BiliSelectScriptAPI = BiliSelectScriptAPI;
 
   let selectionStorage: Record<string, string[]> = {};
   let currentMediaId: string = initialMediaId;
@@ -180,7 +177,7 @@ export function BiliSelectScript(
 
     // 1. 如果需要，执行页面自动滚动
     if (autoScrollDirection !== 0) {
-      window.scrollBy(0, AUTO_SCROLL_SPEED_MAX * autoScrollDirection);
+      unsafeWindow.scrollBy(0, AUTO_SCROLL_SPEED_MAX * autoScrollDirection);
     }
 
     // 2. 更新选择框的视觉样式（处理坐标转换）
@@ -201,8 +198,10 @@ export function BiliSelectScript(
     if (!selectionRectElement) return;
 
     // 1. 获取当前页面的滚动偏移量
-    const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
-    const scrollY = window.pageYOffset || document.documentElement.scrollTop;
+    const scrollX =
+      unsafeWindow.pageXOffset || document.documentElement.scrollLeft;
+    const scrollY =
+      unsafeWindow.pageYOffset || document.documentElement.scrollTop;
 
     // 2. 计算“锚点”（鼠标按下的点）在整个文档中的绝对坐标。
     //    这个坐标在拖拽期间是固定不变的。
@@ -297,9 +296,9 @@ export function BiliSelectScript(
         }
 
         // 3. 【关键】将此“期望”状态实时同步到 TaskSelectorManager
-        if (window.TaskSelectorManager) {
+        if (unsafeWindow.TaskSelectorManager) {
           // `true` 表示这个选择状态的改变源自 BiliSelectScript
-          window.TaskSelectorManager.selectTasksByBv(
+          unsafeWindow.TaskSelectorManager.selectTasksByBv(
             bvId,
             shouldBeSelectedNow,
             true,
@@ -365,20 +364,30 @@ export function BiliSelectScript(
       // 确保任务已添加到 TaskManager
       // addSingleVideo 应该能处理重复添加（不重复添加任务，但可能重复获取分页）
       // 或者 TaskManager.addTaskData 本身就是幂等的
-      if (window.TaskSelectorManager) {
+      if (unsafeWindow.TaskSelectorManager) {
         const folderName =
-          window.folders?.get(currentMediaId) || "Unknown Folder";
+          unsafeWindow.folders?.get(currentMediaId) || "Unknown Folder";
         // Pass true for the new parameter
-        addSingleVideo(String(currentMediaId), folderName, bvId!, window, true);
+        addSingleVideo(
+          String(currentMediaId),
+          folderName,
+          bvId!,
+          unsafeWindow,
+          true,
+        );
       }
     }
 
     // Sync selection state with TaskManager
-    if (window.TaskSelectorManager) {
+    if (unsafeWindow.TaskSelectorManager) {
       console.log(
         `BiliSelect.toggleSelection: Calling TaskManager.selectTasksByBv for ${bvId}, select: ${isNowSelected}`,
       );
-      window.TaskSelectorManager.selectTasksByBv(bvId, isNowSelected, true);
+      unsafeWindow.TaskSelectorManager.selectTasksByBv(
+        bvId,
+        isNowSelected,
+        true,
+      );
     }
   }
 
@@ -470,8 +479,9 @@ export function BiliSelectScript(
     lastClientX = event.clientX;
     lastClientY = event.clientY;
     selectionBoxStart = { x: event.clientX, y: event.clientY };
-    // 【关键】直接使用 window.pageYOffset 获取最准确的页面滚动值
-    startScrollTop = window.pageYOffset || document.documentElement.scrollTop;
+    // 【关键】直接使用 unsafeWindow.pageYOffset 获取最准确的页面滚动值
+    startScrollTop =
+      unsafeWindow.pageYOffset || document.documentElement.scrollTop;
 
     // 2. 记录当前所有已选中项的 BV ID
     initialSelectedInDragOp.clear();
@@ -511,7 +521,7 @@ export function BiliSelectScript(
     let scrollDirection = 0;
     if (lastClientY < AUTO_SCROLL_ZONE_SIZE) {
       scrollDirection = -1; // 向上
-    } else if (lastClientY > window.innerHeight - AUTO_SCROLL_ZONE_SIZE) {
+    } else if (lastClientY > unsafeWindow.innerHeight - AUTO_SCROLL_ZONE_SIZE) {
       scrollDirection = 1; // 向下
     }
     autoScrollDirection = scrollDirection;
@@ -572,8 +582,8 @@ export function BiliSelectScript(
     toggleSelection(targetCard);
   }
 
-  const originalFetch = window.fetch;
-  window.fetch = async (
+  const originalFetch = unsafeWindow.fetch;
+  unsafeWindow.fetch = async (
     ...args: [RequestInfo | URL, RequestInit?]
   ): Promise<Response> => {
     const url = args[0] instanceof Request ? args[0].url : String(args[0]);
@@ -624,7 +634,7 @@ export function BiliSelectScript(
     // responsePromise is the Promise returned by the fetch call. It will eventually
     // resolve with a Response object or reject with an error.
     const responsePromise: Promise<Response> = originalFetch.apply(
-      window,
+      unsafeWindow,
       args as any,
     );
 
@@ -742,7 +752,7 @@ export function BiliSelectScript(
     log("Injected custom styles for BiliSelectScript.");
   }
 
-  window.showBiliSelections = (mediaId: string | null = null): void => {
+  unsafeWindow.showBiliSelections = (mediaId: string | null = null): void => {
     console.log(`${LOG_PREFIX} --- Inspecting Selection Storage ---`);
     if (mediaId) {
       if (selectionStorage.hasOwnProperty(mediaId)) {
@@ -788,7 +798,7 @@ export function BiliSelectScript(
     console.log(`${LOG_PREFIX} --- End Inspection ---`);
   };
 
-  window.removeBiliSelections = (
+  unsafeWindow.removeBiliSelections = (
     mediaId: string,
     bvIdsToRemove: string[],
   ): void => {
@@ -861,7 +871,7 @@ export function BiliSelectScript(
     // Initial sync: After BiliSelectScript has established its selections (event.g. from cache or default)
     // Tell TaskManager about BiliSelect's current selections for the active media_id
     if (
-      window.TaskSelectorManager &&
+      unsafeWindow.TaskSelectorManager &&
       currentSelection &&
       currentSelection.length > 0
     ) {
@@ -871,16 +881,20 @@ export function BiliSelectScript(
       currentSelection.forEach((selectedBvId) => {
         // Ensure tasks for this BV are loaded in TaskManager first
         const folderName =
-          window.folders?.get(currentMediaId) || "Unknown Folder";
+          unsafeWindow.folders?.get(currentMediaId) || "Unknown Folder";
         // Pass true here as well, these are selected in BiliSelect
         addSingleVideo(
           String(currentMediaId),
           folderName,
           selectedBvId,
-          window,
+          unsafeWindow,
           true,
         );
-        window.TaskSelectorManager!.selectTasksByBv(selectedBvId, true, true);
+        unsafeWindow.TaskSelectorManager!.selectTasksByBv(
+          selectedBvId,
+          true,
+          true,
+        );
       });
     }
   }

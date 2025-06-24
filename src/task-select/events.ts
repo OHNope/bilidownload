@@ -2,6 +2,10 @@ import { states } from "./states";
 import { renderTasksForCurrentTab } from "./render";
 import { findChildTaskByIdGlobal } from "./utils";
 import { TaskSelectorManager } from "./utils";
+import { SelectedTask } from "./types";
+import { updateTaskStateById } from "./utils";
+import { download } from "./download";
+import { scheduleTick } from "./render";
 
 function updateSelectionBoxVisuals(): void {
   if (
@@ -283,4 +287,75 @@ export function handleMouseUpSelectBox(event: PointerEvent): void {
     states.startContainerRect = null;
     states.startScrollTop = 0;
   }
+}
+
+export function handleConnectionLost(): void {
+  if (states.activeDownloads.size === 0) return;
+  for (const [_taskId, handle] of states.activeDownloads.entries()) {
+    handle.abort();
+  }
+  states.activeDownloads.clear();
+}
+
+export async function handleConnectionRestored(): Promise<void> {
+  let totalRestartedCount = 0;
+  for (const windowId in states.progressWindows) {
+    const pwData = states.progressWindows[windowId];
+    if (!pwData) continue;
+    const tasksToRestartInWindow = pwData.tasks.filter(
+      (t) => t.status === "failed",
+    );
+    if (tasksToRestartInWindow.length === 0) continue;
+    totalRestartedCount += tasksToRestartInWindow.length;
+    const tasksForDownload: Record<string, SelectedTask> = {};
+    tasksToRestartInWindow.forEach((task) => {
+      updateTaskStateById(windowId, task.id, {
+        status: "pending",
+        progress: 0,
+      });
+      tasksForDownload[task.id] = {
+        id: task.id,
+        name: task.name,
+        bv: task.bv,
+        marked: true,
+      };
+    });
+    download(tasksForDownload, windowId).catch((_error) => {
+      tasksToRestartInWindow.forEach((task) => {
+        updateTaskStateById(windowId, task.id, {
+          status: "failed",
+          progress: 0,
+        });
+      });
+    });
+  }
+  if (totalRestartedCount > 0) {
+    alert(
+      `网络已恢复, 已在现有窗口中尝试重新启动 ${totalRestartedCount} 个失败的任务。`,
+    );
+  }
+}
+
+export function handleTaskListScroll(): void {
+  if (
+    !states.taskListContainer ||
+    !states.currentTabId ||
+    !states.tabStates[states.currentTabId]
+  )
+    return;
+  const state = states.tabStates[states.currentTabId];
+  state.taskScrollTop = states.taskListContainer.scrollTop;
+  state.needsRender = true;
+  scheduleTick();
+}
+
+export function handleTabsScroll(): void {
+  if (
+    !states.tabsContainer ||
+    !states.currentTabId ||
+    !states.tabStates[states.currentTabId]
+  )
+    return;
+  states.tabStates[states.currentTabId].tabScrollLeft =
+    states.tabsContainer.scrollLeft;
 }

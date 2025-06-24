@@ -1,5 +1,5 @@
 import { TaskSelectorManager } from "./task-select/index";
-import { BiliSelectScript } from "./bili-select/index";
+import { BiliSelectManager } from "./bili-select/index";
 import { gmFetch, addSingleVideo } from "./core/utils";
 
 // CSS Selectors
@@ -118,7 +118,7 @@ function extractKeysFromFirstContainer(
     }
 
     // Initialize the BiliSelect script after getting the folders
-    BiliSelectScript(fid);
+    new BiliSelectManager(fid);
   } else if (MatchVideo && MatchVideo[1]) {
     let bvId = MatchVideo[1]; // The BV ID from the URL path
     if (!bvId) {

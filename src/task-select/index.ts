@@ -21,30 +21,27 @@ export class TaskSelectorManager implements TaskSelectorManagerAPI {
     }
 
     // 立即开始初始化
-    this.init();
-  }
-
-  // --- 私有工具函数 (从原 TaskSelectScript 移入) ---
-  private debounce<T extends (...args: any[]) => void>(
-    func: T,
-    wait: number,
-  ): (...args: Parameters<T>) => void {
-    let timeout: number | undefined;
-    return (...args: Parameters<T>) => {
-      const later = () => {
-        clearTimeout(timeout);
-        func(...args);
-      };
-      clearTimeout(timeout);
-      timeout = unsafeWindow.setTimeout(later, wait);
-    };
+    this.#init();
   }
 
   // --- 初始化逻辑 (从原 init 函数移入) ---
-  private init(): void {
+  #init(): void {
     if (states.container) return;
 
-    const debouncedTabsScrollSave = this.debounce(handleTabsScroll, 150);
+    const debouncedTabsScrollSave = (<T extends (...args: any[]) => void>(
+      func: T,
+      wait: number,
+    ): (...args: Parameters<T>) => void => {
+      let timeout: number | undefined;
+      return (...args: Parameters<T>) => {
+        const later = () => {
+          clearTimeout(timeout);
+          func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = unsafeWindow.setTimeout(later, wait);
+      };
+    })(handleTabsScroll, 150);
     injectStyles();
     states.container = document.createElement("div");
     states.container.className = "task-selector-container";

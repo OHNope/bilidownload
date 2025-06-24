@@ -1,4 +1,10 @@
 import { states } from "./states";
+import { SelectedTask, ProgressTaskItem, ProgressWindowState } from "./types";
+import { scheduleTick } from "./render";
+import { updateTaskStateById } from "./utils";
+import { renderProgressItems } from "./render";
+import { createDragHandler, createResizeHandler } from "./interations";
+
 const styles: string = `
     .task-selector-container { position: fixed; z-index: 99999; background-color: rgba(240, 240, 240, 0.95); border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: border-radius 0.2s ease-out; overflow: hidden; user-select: none; color: #333; font-family: sans-serif; min-width: 120px; min-height: 70px; }
     .task-selector-container.collapsed { width: 50px !important; height: 50px !important; border-radius: 50%; cursor: grab; overflow: hidden; align-items: center; justify-content: center; min-width: 50px !important; min-height: 50px !important; }
@@ -53,6 +59,28 @@ const styles: string = `
     .task-selector-task-item { padding: 5px 8px; box-sizing: border-box; }
 `;
 
+function updateTaskProgressById(wId: string, tId: string, p: number): void {
+  updateTaskStateById(wId, tId, { progress: p });
+}
+
+function checkProgressCompletion(wId: string): void {
+  const pw = states.progressWindows[wId];
+  if (!pw?.closeButton) return;
+  const allDone = pw.tasks.every(
+    (t) => t.status === "completed" || t.status === "failed",
+  );
+  pw.closeButton.classList.toggle("visible", allDone);
+}
+
+function handleProgressScroll(windowId: string): void {
+  const pwData = states.progressWindows[windowId];
+  const pwState = pwData?.state;
+  if (!pwData?.listElement || !pwState) return;
+  pwState.scrollTop = pwData.listElement.scrollTop;
+  pwState.needsRender = true;
+  scheduleTick();
+}
+
 export function injectStyles(): void {
   document.getElementById("task-selector-styles")?.remove();
   const s = document.createElement("style");
@@ -60,6 +88,97 @@ export function injectStyles(): void {
   s.innerText = styles;
   document.head.appendChild(s);
 }
+
+export function createProgressWindow(tasksForWindow: SelectedTask[]): string {
+  states.progressWindowCounter++;
+  const windowId = `progress-unsafeWindow-${states.progressWindowCounter}`;
+  const preparedTasks: ProgressTaskItem[] = tasksForWindow.map((t) => ({
+    ...t,
+    progress: 0,
+    windowId,
+    status: "pending",
+  }));
+  const state: ProgressWindowState = {
+    id: windowId,
+    top: `${50 + states.progressWindowCounter * 15}px`,
+    left: `${50 + states.progressWindowCounter * 15}px`,
+    width: "300px",
+    height: "250px",
+    scrollTop: 0,
+    needsRender: false,
+    lastRenderedScrollTop: -1,
+  };
+  const pwC = document.createElement("div");
+  pwC.id = windowId;
+  pwC.className = "task-progress-unsafeWindow";
+  Object.assign(pwC.style, {
+    top: state.top,
+    left: state.left,
+    width: state.width,
+    height: state.height,
+  });
+  const pwH = document.createElement("div");
+  pwH.className = "task-progress-header";
+  pwH.innerHTML = `<span class="task-progress-title">任务进度 (${preparedTasks.length})</span>`;
+  const pwX = document.createElement("div");
+  pwX.className = "task-progress-close-btn";
+  pwX.textContent = "✕";
+  pwX.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeProgressWindow(windowId);
+  });
+  pwH.appendChild(pwX);
+  const pwL = document.createElement("div");
+  pwL.className = "task-progress-list-container";
+  const pwR = document.createElement("div");
+  pwR.className = "task-progress-resizer";
+  pwC.append(pwH, pwL, pwR);
+  document.body.appendChild(pwC);
+  const cleanupFunctions: (() => void)[] = [];
+  cleanupFunctions.push(
+    createDragHandler({ triggerElement: pwH, movableElement: pwC, state }),
+  );
+  cleanupFunctions.push(
+    createResizeHandler({
+      resizeHandleElement: pwR,
+      resizableElement: pwC,
+      state,
+      onResize: () => {
+        if (states.progressWindows[windowId]?.state)
+          states.progressWindows[windowId].state.needsRender = true;
+        scheduleTick();
+      },
+      onResizeEnd: () => {
+        if (states.progressWindows[windowId]?.state) {
+          states.progressWindows[windowId].state.needsRender = true;
+          states.progressWindows[windowId].state.lastRenderedScrollTop = -1;
+        }
+        scheduleTick();
+      },
+    }),
+  );
+  states.progressWindows[windowId] = {
+    element: pwC,
+    listElement: pwL,
+    closeButton: pwX,
+    tasks: preparedTasks,
+    state,
+    checkCompletion: () => checkProgressCompletion(windowId),
+    updateProgress: (tid, p) => updateTaskProgressById(windowId, tid, p),
+    renderItems: (f = false) => renderProgressItems(windowId, f),
+    handleScroll: () => handleProgressScroll(windowId),
+    cleanupFunctions,
+  };
+  pwL.addEventListener(
+    "scroll",
+    states.progressWindows[windowId].handleScroll,
+    { passive: true },
+  );
+  renderProgressItems(windowId, true);
+  states.progressWindows[windowId].checkCompletion();
+  return windowId;
+}
+
 export function closeProgressWindow(windowId: string): void {
   const pw = states.progressWindows[windowId];
   if (!pw?.element) return;

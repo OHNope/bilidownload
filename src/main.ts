@@ -1,6 +1,6 @@
 import { TaskSelectScript } from "./task-select/index";
 import { BiliSelectScript } from "./bili-select";
-import { gmFetch, addSingleVideo } from "./utils";
+import { gmFetch, addSingleVideo } from "./core/utils";
 
 // CSS Selectors
 const CONTAINER_SELECTOR = "div.video-pod__list.section";

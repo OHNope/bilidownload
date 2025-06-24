@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../dist/types/bili-select"
+  },
+  "include": ["./"],
+  "references": [{ "path": "../core" }]
+}

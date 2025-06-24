@@ -2,5 +2,7 @@ test8.js
 dist
 node_modules
 test.ts
-src.zip
+*.zip
 .DS_Store
+*.d.ts
+*.d.ts.map

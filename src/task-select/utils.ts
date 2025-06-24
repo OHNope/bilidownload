@@ -1,9 +1,8 @@
 import { ProgressTaskItem } from "./types";
 import { states } from "./states";
-import { TaskSelectorManagerAPI } from "../types";
+import { TaskSelectorManagerAPI } from "../core/types";
 import { ParentTask, Task } from "./types";
-import { renderTabs } from "./render";
-import { scheduleTick } from "./render";
+import { renderTabs, scheduleTick } from "./render";
 import { closeProgressWindow } from "./ui";
 
 export function updateTaskStateById(

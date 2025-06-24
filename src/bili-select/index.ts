@@ -1,5 +1,5 @@
-import { BiliSelectScriptAPI_Interface } from "./types";
-import { addSingleVideo } from "./utils";
+import { BiliSelectScriptAPI_Interface } from "../core/types";
+import { addSingleVideo } from "../core/utils";
 
 export function BiliSelectScript(initialMediaId: string): void {
   "use strict";

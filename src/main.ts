@@ -1,5 +1,5 @@
 import { TaskSelectScript } from "./task-select/index";
-import { BiliSelectScript } from "./bili-select";
+import { BiliSelectScript } from "./bili-select/index";
 import { gmFetch, addSingleVideo } from "./core/utils";
 
 // CSS Selectors

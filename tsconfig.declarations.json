@@ -1,9 +1,0 @@
-{
-  "files": [],
-  "include": [],
-  "references": [
-    { "path": "./src/core" },
-    { "path": "./src/task-select" },
-    { "path": "./src/bili-select" }
-  ]
-}

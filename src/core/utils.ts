@@ -71,9 +71,9 @@ export async function addSingleVideo(
     // Check if the video has multiple parts (pages)
     const pages = viewData.data.pages
       ? viewData.data.pages.map((p: any) => ({
-          cid: String(p.cid),
-          part: String(p.part),
-        }))
+        cid: String(p.cid),
+        part: String(p.part),
+      }))
       : [{ cid: String(viewData.data.cid), part: videoTitle }]; // Fallback for single-part video
 
     if (pages.length === 0) {
@@ -102,4 +102,12 @@ export async function addSingleVideo(
       error,
     );
   }
+}
+
+export function InjectedStyles(styleId: string, cssString: string) {
+  document.getElementById(styleId)?.remove();
+  const style = document.createElement("style");
+  style.id = styleId;
+  style.textContent = cssString;
+  document.head.appendChild(style);
 }

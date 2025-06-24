@@ -1,5 +1,5 @@
 import { BiliSelectScriptAPI_Interface } from "../core/types";
-import { addSingleVideo } from "../core/utils";
+import { addSingleVideo, InjectedStyles } from "../core/utils";
 
 export class BiliSelectManager {
   // --- Constants and Selectors (Private) ---
@@ -177,8 +177,24 @@ export class BiliSelectManager {
       `Detected favlist page. Initial media_id (fid): ${this.#currentMediaId
       }. Initializing script.`,
     );
-
-    this.#injectStylesBiliSelect();
+    InjectedStyles("bili-select-script-styles-v3", `
+            .${this.#SELECTED_CLASS} {
+                outline: 3px solid #00a1d6 !important;
+                box-shadow: 0 0 10px rgba(0, 161, 214, 0.8) !important;
+                border-radius: 6px;
+                transform: translateZ(0);
+                background-color: rgba(0, 161, 214, 0.03);
+            }
+            #${this.#SELECTION_RECT_ID} {
+                position: absolute;
+                top: 0;
+                left: 0;
+                border: 1px dashed #00a1d6;
+                background-color: rgba(0, 161, 214, 0.15);
+                z-index: 9999;
+                pointer-events: none;
+            }
+        `)
     this.#setupEventListeners();
     this.#overrideFetch();
     this.#exposeApiToWindow();
@@ -236,34 +252,6 @@ export class BiliSelectManager {
     unsafeWindow.BiliSelectScriptAPI = BiliSelectScriptAPI;
     unsafeWindow.showBiliSelections = this.#showBiliSelections.bind(this);
     unsafeWindow.removeBiliSelections = this.#removeBiliSelections.bind(this);
-  }
-
-  #injectStylesBiliSelect(): void {
-    const css = `
-            .${this.#SELECTED_CLASS} {
-                outline: 3px solid #00a1d6 !important;
-                box-shadow: 0 0 10px rgba(0, 161, 214, 0.8) !important;
-                border-radius: 6px;
-                transform: translateZ(0);
-                background-color: rgba(0, 161, 214, 0.03);
-            }
-            #${this.#SELECTION_RECT_ID} {
-                position: absolute;
-                top: 0;
-                left: 0;
-                border: 1px dashed #00a1d6;
-                background-color: rgba(0, 161, 214, 0.15);
-                z-index: 9999;
-                pointer-events: none;
-            }
-        `;
-    const styleId = "bili-select-script-styles-v3";
-    document.getElementById(styleId)?.remove();
-    const style = document.createElement("style");
-    style.id = styleId;
-    style.textContent = css;
-    document.head.appendChild(style);
-    this.#log("Injected custom styles for BiliSelectManager.");
   }
 
   #getBvId(element: HTMLElement | null): string | null {

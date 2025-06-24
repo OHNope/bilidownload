@@ -1,13 +1,13 @@
 import { states } from "./states";
 import { renderTasksForCurrentTab, scheduleTick, renderTabs } from "./render";
 import { toggleCollapse, handleMouseDownTaskList, handleTabsScroll, handleTaskListScroll, handleConnectionLost, handleConnectionRestored } from "./events";
-import { injectStyles } from "./ui";
+import { InjectedStyles } from "../core/utils";
 import { createDragHandler, createResizeHandler } from "./interations";
 import { confirmSelection, deselectAllTasks, selectVisibleTasks, deselectVisibleTasks, selectAllTasksInTab } from "./actions";
 import { TaskSelectorManagerAPI } from "../core/types"; // 导入接口
 import { ParentTask, Task } from "./types"; // 导入类型
 import { findChildTaskByIdGlobal } from "./utils"; // 导入需要的工具函数
-import { closeProgressWindow } from "./ui"; // 导入需要的UI函数
+import { closeProgressWindow, styles } from "./ui"; // 导入需要的UI函数
 
 // --- 新的 TaskSelectorManager 类定义 ---
 export class TaskSelectorManager implements TaskSelectorManagerAPI {
@@ -42,7 +42,7 @@ export class TaskSelectorManager implements TaskSelectorManagerAPI {
         timeout = unsafeWindow.setTimeout(later, wait);
       };
     })(handleTabsScroll, 150);
-    injectStyles();
+    InjectedStyles("task-selector-styles", styles);
     states.container = document.createElement("div");
     states.container.className = "task-selector-container";
     states.container.setAttribute("draggable", "false");

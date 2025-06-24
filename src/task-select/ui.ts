@@ -5,7 +5,7 @@ import { updateTaskStateById } from "./utils";
 import { renderProgressItems } from "./render";
 import { createDragHandler, createResizeHandler } from "./interations";
 
-const styles: string = `
+export const styles: string = `
     .task-selector-container { position: fixed; z-index: 99999; background-color: rgba(240, 240, 240, 0.95); border: 1px solid #ccc; box-shadow: 0 4px 12px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: border-radius 0.2s ease-out; overflow: hidden; user-select: none; color: #333; font-family: sans-serif; min-width: 120px; min-height: 70px; }
     .task-selector-container.collapsed { width: 50px !important; height: 50px !important; border-radius: 50%; cursor: grab; overflow: hidden; align-items: center; justify-content: center; min-width: 50px !important; min-height: 50px !important; }
     .task-selector-container.collapsed > *:not(.task-selector-collapse-indicator):not(.task-selector-header) { display: none; }
@@ -79,14 +79,6 @@ function handleProgressScroll(windowId: string): void {
   pwState.scrollTop = pwData.listElement.scrollTop;
   pwState.needsRender = true;
   scheduleTick();
-}
-
-export function injectStyles(): void {
-  document.getElementById("task-selector-styles")?.remove();
-  const s = document.createElement("style");
-  s.id = "task-selector-styles";
-  s.innerText = styles;
-  document.head.appendChild(s);
 }
 
 export function createProgressWindow(tasksForWindow: SelectedTask[]): string {

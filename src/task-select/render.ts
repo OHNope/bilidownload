@@ -1,6 +1,5 @@
 import { states } from "./states";
 import { FlatTaskItem, ParentTask, Task, TabData } from "./types";
-import { TaskSelectorManager } from "./utils";
 
 function handleTabClick(event: MouseEvent): void {
   event.stopPropagation();
@@ -69,8 +68,8 @@ export function renderTabs(): void {
   }
   const aTab = states.currentTabId
     ? states.tabsContainer.querySelector<HTMLDivElement>(
-        `.task-selector-tab-item[data-tab-id="${states.currentTabId}"]`,
-      )
+      `.task-selector-tab-item[data-tab-id="${states.currentTabId}"]`,
+    )
     : null;
   if (aTab) {
     aTab.classList.add("active");
@@ -98,12 +97,12 @@ export function renderProgressItems(
   const startIndex = Math.max(
     0,
     Math.floor(scrollTop / states.PROGRESS_ITEM_HEIGHT) -
-      states.PROGRESS_VISIBLE_ITEMS_BUFFER,
+    states.PROGRESS_VISIBLE_ITEMS_BUFFER,
   );
   const endIndex = Math.min(
     tasks.length,
     Math.ceil((scrollTop + containerHeight) / states.PROGRESS_ITEM_HEIGHT) +
-      states.PROGRESS_VISIBLE_ITEMS_BUFFER,
+    states.PROGRESS_VISIBLE_ITEMS_BUFFER,
   );
   const fragment = document.createDocumentFragment();
   listContainer.innerHTML = "";
@@ -181,7 +180,7 @@ function tick(): void {
     if (
       state.lastRenderedScrollTop === -1 ||
       Math.abs(state.taskScrollTop - state.lastRenderedScrollTop) >
-        states.SCROLL_RENDER_THRESHOLD
+      states.SCROLL_RENDER_THRESHOLD
     ) {
       renderTasksForCurrentTab();
     } else {
@@ -195,7 +194,7 @@ function tick(): void {
       if (
         pwState.lastRenderedScrollTop === -1 ||
         Math.abs(pwState.scrollTop - pwState.lastRenderedScrollTop) >
-          states.SCROLL_RENDER_THRESHOLD
+        states.SCROLL_RENDER_THRESHOLD
       ) {
         renderProgressItems(windowId);
       } else {
@@ -231,7 +230,7 @@ function handleChildTaskClick(event: MouseEvent): void {
   }
   if (unsafeWindow.BiliSelectScriptAPI) {
     const anyChildStillSelected =
-      TaskSelectorManager.isAnyTaskSelectedForBv(parentBvId);
+      unsafeWindow.TaskSelectorManager!.isAnyTaskSelectedForBv(parentBvId);
     unsafeWindow.BiliSelectScriptAPI.selectVideoCardByBv(
       parentBvId,
       anyChildStillSelected,
@@ -372,8 +371,8 @@ export function renderTasksForCurrentTab(forceUpdate: boolean = false): void {
   const totalHeight =
     flatItems.length > 0
       ? flatItems[flatItems.length - 1].top +
-        flatItems[flatItems.length - 1].height +
-        5
+      flatItems[flatItems.length - 1].height +
+      5
       : 10;
   const spacer = states.taskListContainer.querySelector(
     ".virtual-scroll-spacer",

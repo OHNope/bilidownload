@@ -4,7 +4,6 @@ import { createProgressWindow, closeProgressWindow } from "./ui";
 import { download } from "./download";
 import { renderTasksForCurrentTab } from "./render";
 import { SelectedTask } from "./types";
-import { TaskSelectorManager } from "./utils";
 
 export function confirmSelection(): string | undefined {
     const tasksToProcess = Array.from(states.selectedTaskIds)
@@ -71,7 +70,7 @@ function processVisibleTasks(
             affectedBvIds.forEach((bvId) => {
                 unsafeWindow.BiliSelectScriptAPI!.selectVideoCardByBv(
                     bvId,
-                    TaskSelectorManager.isAnyTaskSelectedForBv(bvId),
+                    unsafeWindow.TaskSelectorManager!.isAnyTaskSelectedForBv(bvId),
                     true,
                 );
             });

@@ -1,21 +1,31 @@
-import { TaskSelectorManager } from "./utils";
 import { states } from "./states";
 import { renderTasksForCurrentTab, scheduleTick, renderTabs } from "./render";
 import { toggleCollapse, handleMouseDownTaskList, handleTabsScroll, handleTaskListScroll, handleConnectionLost, handleConnectionRestored } from "./events";
 import { injectStyles } from "./ui";
 import { createDragHandler, createResizeHandler } from "./interations";
 import { confirmSelection, deselectAllTasks, selectVisibleTasks, deselectVisibleTasks, selectAllTasksInTab } from "./actions";
+import { TaskSelectorManagerAPI } from "../core/types"; // 导入接口
+import { ParentTask, Task } from "./types"; // 导入类型
+import { findChildTaskByIdGlobal } from "./utils"; // 导入需要的工具函数
+import { closeProgressWindow } from "./ui"; // 导入需要的UI函数
 
-export function TaskSelectScript(): void {
-  // --- 防止重复注入 ---
-  if (unsafeWindow.TaskSelectorManager) {
-    console.log(
-      "Task Selector Manager already injected. Destroying previous instance.",
-    );
-    unsafeWindow.TaskSelectorManager.destroy?.();
+// --- 新的 TaskSelectorManager 类定义 ---
+export class TaskSelectorManager implements TaskSelectorManagerAPI {
+  constructor() {
+    // --- 防止重复注入 ---
+    if (unsafeWindow.TaskSelectorManager) {
+      console.log(
+        "Task Selector Manager already injected. Destroying previous instance.",
+      );
+      unsafeWindow.TaskSelectorManager.destroy?.();
+    }
+
+    // 立即开始初始化
+    this.init();
   }
-  // --- 工具函数 ---
-  function debounce<T extends (...args: any[]) => void>(
+
+  // --- 私有工具函数 (从原 TaskSelectScript 移入) ---
+  private debounce<T extends (...args: any[]) => void>(
     func: T,
     wait: number,
   ): (...args: Parameters<T>) => void {
@@ -30,11 +40,11 @@ export function TaskSelectScript(): void {
     };
   }
 
-
-  const debouncedTabsScrollSave = debounce(handleTabsScroll, 150);
-
-  function init(): void {
+  // --- 初始化逻辑 (从原 init 函数移入) ---
+  private init(): void {
     if (states.container) return;
+
+    const debouncedTabsScrollSave = this.debounce(handleTabsScroll, 150);
     injectStyles();
     states.container = document.createElement("div");
     states.container.className = "task-selector-container";
@@ -64,67 +74,35 @@ export function TaskSelectScript(): void {
     states.buttonsContainer = document.createElement("div");
     states.buttonsContainer.className = "task-selector-buttons";
     [
-      {
-        text: "确认选中",
-        action: confirmSelection,
-        title: "处理选中的任务并创建进度窗口",
-      },
-      {
-        text: "选可见",
-        action: selectVisibleTasks,
-        title: "选择当前列表视区内所有任务",
-      },
-      {
-        text: "全不选",
-        action: deselectAllTasks,
-        title: "取消选择所有分页中的全部任务",
-      },
-      {
-        text: "去可见",
-        action: deselectVisibleTasks,
-        title: "取消选择当前列表视区内的任务",
-      },
-      {
-        text: "选分页",
-        action: selectAllTasksInTab,
-        title: "选择当前分页下的所有任务",
-      },
+      { text: "确认选中", action: confirmSelection, title: "处理选中的任务并创建进度窗口" },
+      { text: "选可见", action: selectVisibleTasks, title: "选择当前列表视区内所有任务" },
+      { text: "全不选", action: deselectAllTasks, title: "取消选择所有分页中的全部任务" },
+      { text: "去可见", action: deselectVisibleTasks, title: "取消选择当前列表视区内的任务" },
+      { text: "选分页", action: selectAllTasksInTab, title: "选择当前分页下的所有任务" },
     ].forEach((bi) => {
       const b = document.createElement("button");
       b.textContent = bi.text;
       b.title = bi.title;
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        bi.action();
-      });
+      b.addEventListener("click", (e) => { e.stopPropagation(); bi.action(); });
       states.buttonsContainer!.appendChild(b);
     });
     const cW = document.createElement("div");
     cW.className = "task-selector-content-wrapper";
     states.taskListContainer = document.createElement("div");
     states.taskListContainer.className = "task-selector-task-list-container";
-    states.taskListContainer.addEventListener("scroll", handleTaskListScroll, {
-      passive: true,
-    });
-    states.taskListContainer.addEventListener(
-      "pointerdown",
-      handleMouseDownTaskList as EventListener,
-    );
+    states.taskListContainer.addEventListener("scroll", handleTaskListScroll, { passive: true });
+    states.taskListContainer.addEventListener("pointerdown", handleMouseDownTaskList as EventListener);
     const spacer = document.createElement("div");
     spacer.className = "virtual-scroll-spacer";
     states.taskListContainer.appendChild(spacer);
     states.tabsContainer = document.createElement("div");
     states.tabsContainer.className = "task-selector-tabs-container";
-    states.tabsContainer.addEventListener("scroll", debouncedTabsScrollSave, {
-      passive: true,
-    });
+    states.tabsContainer.addEventListener("scroll", debouncedTabsScrollSave, { passive: true });
     const rsz = document.createElement("div");
     rsz.className = "task-selector-resizer";
     states.globalCleanupFunctions.push(
       createResizeHandler({
-        resizeHandleElement: rsz,
-        resizableElement: states.container,
-        state: states.windowState,
+        resizeHandleElement: rsz, resizableElement: states.container, state: states.windowState,
         onResize: () => {
           if (states.currentTabId && states.tabStates[states.currentTabId])
             states.tabStates[states.currentTabId].needsRender = true;
@@ -154,28 +132,184 @@ export function TaskSelectScript(): void {
       states.container.style.height = states.windowState.height;
     }
     renderTabs();
-    if (!states.windowState.collapsed && states.currentTabId)
-      renderTasksForCurrentTab(true);
+    if (!states.windowState.collapsed && states.currentTabId) renderTasksForCurrentTab(true);
     const onlineHandler = handleConnectionRestored as EventListener,
       offlineHandler = handleConnectionLost as EventListener;
     unsafeWindow.addEventListener("online", onlineHandler);
     unsafeWindow.addEventListener("offline", offlineHandler);
-    states.globalCleanupFunctions.push(() =>
-      unsafeWindow.removeEventListener("online", onlineHandler),
-    );
-    states.globalCleanupFunctions.push(() =>
-      unsafeWindow.removeEventListener("offline", offlineHandler),
-    );
+    states.globalCleanupFunctions.push(() => unsafeWindow.removeEventListener("online", onlineHandler));
+    states.globalCleanupFunctions.push(() => unsafeWindow.removeEventListener("offline", offlineHandler));
+
+    // 将自身实例暴露给 window
+    unsafeWindow.TaskSelectorManager = this;
   }
 
-  unsafeWindow.TaskSelectorManager = TaskSelectorManager;
-
-  function attemptInit() {
-    if (document.body) {
-      init();
-    } else {
-      document.addEventListener("DOMContentLoaded", init, { once: true });
+  // --- 公共 API 方法 (从 utils.ts 移入) ---
+  public addTaskData(tabId: string, tabName: string, parentTaskInputs: any[], autoSelectNewChildren = false): void {
+    if (!tabId || !tabName || !Array.isArray(parentTaskInputs)) return;
+    const sId = String(tabId);
+    let needsReRenderCurrentTab = false,
+      tabCreated = false;
+    if (!states.allTasksData[sId]) {
+      states.allTasksData[sId] = { name: tabName, tasks: [] };
+      states.tabStates[sId] = {
+        taskScrollTop: 0,
+        tabScrollLeft: 0,
+        needsRender: false,
+        lastRenderedScrollTop: -1,
+      };
+      tabCreated = true;
+      if (!states.currentTabId) states.currentTabId = sId;
+    }
+    const tabParentTasks = states.allTasksData[sId].tasks;
+    parentTaskInputs.forEach((videoInput) => {
+      const existingParentTask = tabParentTasks.find(
+        (pt) => pt.bv === videoInput.bvId,
+      );
+      if (existingParentTask) {
+        if (autoSelectNewChildren) {
+          existingParentTask.children.forEach((childTask) => {
+            if (!states.markedTaskIds.has(childTask.id)) {
+              states.selectedTaskIds.add(childTask.id);
+              needsReRenderCurrentTab = true;
+            }
+          });
+        }
+        return;
+      }
+      const children: Task[] = videoInput.pages.map((page: any) => ({
+        id: String(page.cid),
+        name: String(page.part),
+        bv: videoInput.bvId,
+      }));
+      if (children.length === 0) return;
+      children.forEach((child) => states.taskMap.set(child.id, child));
+      const newParentTask: ParentTask = {
+        name: videoInput.videoTitle,
+        bv: videoInput.bvId,
+        children,
+        isExpanded: true,
+        MediaId: tabId,
+      };
+      tabParentTasks.push(newParentTask);
+      needsReRenderCurrentTab = true;
+      if (autoSelectNewChildren) {
+        newParentTask.children.forEach((childTask) =>
+          states.selectedTaskIds.add(childTask.id),
+        );
+      }
+    });
+    if (tabCreated && states.tabsContainer) renderTabs();
+    if (
+      needsReRenderCurrentTab &&
+      sId === states.currentTabId &&
+      !states.windowState.collapsed &&
+      states.taskListContainer
+    ) {
+      if (states.tabStates[sId]) {
+        states.tabStates[sId].needsCacheUpdate = true;
+        states.tabStates[sId].needsRender = true;
+        states.tabStates[sId].lastRenderedScrollTop = -1;
+      }
+      scheduleTick();
     }
   }
-  attemptInit();
+
+  public updateTaskProgress(wId: string, tId: string, p: number): void {
+    states.progressWindows[String(wId)]?.updateProgress(String(tId), p)
+  }
+
+  public getSelectedTaskIds(): string[] {
+    return Array.from(states.selectedTaskIds);
+  }
+
+  public isTaskSelected(taskId: string): boolean {
+    return states.selectedTaskIds.has(taskId);
+  }
+
+  public isAnyTaskSelectedForBv(bvId: string): boolean {
+    if (!bvId) return false;
+    for (const taskId of states.selectedTaskIds) {
+      const taskData = findChildTaskByIdGlobal(taskId);
+      if (taskData && taskData.bv === bvId) return true;
+    }
+    return false;
+  }
+
+  public selectTasksByBv(bvId: string, shouldSelect: boolean): void {
+    if (!bvId) return;
+    let changed = false,
+      affectsCurrentTab = false;
+    for (const tabId in states.allTasksData) {
+      const parentTask = states.allTasksData[tabId].tasks.find(
+        (pt) => pt.bv === bvId,
+      );
+      if (parentTask) {
+        parentTask.children.forEach((child) => {
+          const childId = child.id;
+          if (shouldSelect) {
+            if (
+              !states.selectedTaskIds.has(childId) &&
+              !states.markedTaskIds.has(childId)
+            ) {
+              states.selectedTaskIds.add(childId);
+              changed = true;
+            }
+          } else {
+            if (states.selectedTaskIds.has(childId)) {
+              states.selectedTaskIds.delete(childId);
+              changed = true;
+            }
+          }
+        });
+        if (changed && tabId === states.currentTabId) affectsCurrentTab = true;
+      }
+    }
+    if (changed && affectsCurrentTab) {
+      if (
+        states.tabStates[states.currentTabId!] &&
+        !states.windowState.collapsed &&
+        states.taskListContainer
+      ) {
+        states.tabStates[states.currentTabId!].needsRender = true;
+        states.tabStates[states.currentTabId!].lastRenderedScrollTop = -1;
+        scheduleTick();
+      }
+    }
+  }
+
+  public destroy(): void {
+    if (!states.container) return;
+    states.globalCleanupFunctions.forEach((cleanup) => cleanup());
+    states.globalCleanupFunctions.length = 0;
+    Object.keys(states.progressWindows).forEach(closeProgressWindow);
+    states.container.remove();
+    document.getElementById("task-selector-styles")?.remove();
+    // Reset all states
+    Object.assign(states, {
+      allTasksData: {},
+      selectedTaskIds: new Set<string>(),
+      markedTaskIds: new Set<string>(),
+      taskMap: new Map<string, Task>(),
+      activeDownloads: new Map(),
+      currentTabId: null,
+      tabStates: {},
+      windowState: { collapsed: true, top: "20px", left: "20px", width: "350px", height: "450px" },
+      progressWindows: {},
+      progressWindowCounter: 0,
+      isSelectingBox: false,
+      selectionBoxStart: { x: 0, y: 0 },
+      tickScheduled: false,
+      container: null,
+      header: null,
+      body: null,
+      taskListContainer: null,
+      tabsContainer: null,
+      buttonsContainer: null,
+      collapseIndicator: null,
+      selectionBoxElement: null,
+    });
+    // Crucially, remove the global reference to allow for garbage collection and re-initialization
+    delete unsafeWindow.TaskSelectorManager;
+  }
 }

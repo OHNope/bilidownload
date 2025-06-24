@@ -1,7 +1,6 @@
 import { states } from "./states";
 import { renderTasksForCurrentTab } from "./render";
 import { findChildTaskByIdGlobal } from "./utils";
-import { TaskSelectorManager } from "./utils";
 import { SelectedTask } from "./types";
 import { updateTaskStateById } from "./utils";
 import { download } from "./download";
@@ -71,7 +70,7 @@ function updateSelectionFromBox(isFinal: boolean = false): void {
     if (unsafeWindow.BiliSelectScriptAPI) {
       affectedBvIds.forEach((bvIdToUpdate) => {
         const shouldBeSelectedInBili =
-          TaskSelectorManager.isAnyTaskSelectedForBv(bvIdToUpdate);
+          unsafeWindow.TaskSelectorManager!.isAnyTaskSelectedForBv(bvIdToUpdate);
         unsafeWindow.BiliSelectScriptAPI!.selectVideoCardByBv(
           bvIdToUpdate,
           shouldBeSelectedInBili,

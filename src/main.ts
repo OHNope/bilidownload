@@ -1,7 +1,6 @@
-import { TaskSelectScript } from "./task-select/index";
+import { TaskSelectorManager } from "./task-select/index";
 import { BiliSelectScript } from "./bili-select/index";
 import { gmFetch, addSingleVideo } from "./core/utils";
-import type { CustomWindow } from "./core/types"; //!important
 
 // CSS Selectors
 const CONTAINER_SELECTOR = "div.video-pod__list.section";
@@ -81,9 +80,12 @@ function extractKeysFromFirstContainer(
   console.log(`${LOG_PREFIX_MAIN} Favlist Match:`, MatchFavlist);
   console.log(`${LOG_PREFIX_MAIN} Video Match:`, MatchVideo);
 
-  // Initialize the Task Selector UI first, so other scripts can interact with it.
-  TaskSelectScript();
-
+  // automatically initialize the Task Selector UI first, so other scripts can interact with it.
+  if (document.body) {
+    new TaskSelectorManager();
+  } else {
+    document.addEventListener("DOMContentLoaded", () => new TaskSelectorManager(), { once: true });
+  }
   if (MatchFavlist && MatchFavlist[1] && MatchFavlist[2]) {
     unsafeWindow.folders = new Map<string, string>();
     const upMid = MatchFavlist[1];

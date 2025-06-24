@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "declarationDir": "dist/types",
+
+    "emitDeclarationOnly": true,
+    "rootDir": "src"
+  },
+  "include": ["src/main.ts", "src/header.txt"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/core",
+    "src/bili-select",
+    "src/task-select"
+  ],
+  "references": [
+    { "path": "./src/core" },
+    { "path": "./src/bili-select" },
+    { "path": "./src/task-select" }
+  ]
+}

@@ -39,7 +39,7 @@ export interface BiliSelectScriptAPI_Interface {
   isBvSelected: (bvId: string) => boolean;
 }
 
-interface CustomWindow extends Window {
+export interface CustomWindow extends Window {
   TaskSelectorManager?: TaskSelectorManagerAPI;
   BiliSelectScriptAPI?: BiliSelectScriptAPI_Interface; // 新增
   folders?: Map<string, string>;

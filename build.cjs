@@ -16,32 +16,38 @@ async function build() {
     );
   }
 
-  // esbuild 配置
+  // esbuild 配置 (保持不变)
   const commonOptions = {
-    entryPoints: ["src/main.ts"], // 主入口文件
-    bundle: true, // 打包所有文件
-    outfile: "dist/bundle.js", // 输出文件
-    format: "esm", // 输出模块格式
-    platform: "browser", // 简化点：目标平台应为 'browser'
-    sourcemap: true, // 生成 sourcemap
+    entryPoints: ["src/main.ts"],
+    bundle: true,
+    outfile: "dist/bundle.js",
+    format: "esm",
+    platform: "browser",
+    sourcemap: true,
     banner: {
-      js: headerContent, // 注入用户脚本头部
+      js: headerContent,
     },
   };
 
   try {
-    // 1. 构建 JavaScript 文件
-    console.log("⏳ Starting JS build with esbuild..."); // 添加一个开始的日志
-    console.time("JS build time"); // <--- 开始计时
+    // 1. 构建 JavaScript 文件 (保持不变)
+    console.log("⏳ Starting JS build with esbuild...");
+    console.time("JS build time");
     await esbuild.build(commonOptions);
     console.log("✅ JS build complete with header.");
-    console.timeEnd("JS build time"); // <--- 结束计时并打印时间
+    console.timeEnd("JS build time");
 
-    // 2. 调用 tsc 生成 .d.ts 文件 (在 tsconfig.json 中配置)
-    console.log("⏳ Generating TypeScript declarations...");
+    // 2. 调用 tsc --build 生成 .d.ts 文件
+    console.log(
+      "⏳ Generating TypeScript declarations using project references...",
+    );
     console.time("d.ts generation");
 
-    exec("tsc --emitDeclarationOnly", (error, _stdout, stderr) => {
+    // --- MODIFICATION START ---
+    // 使用 tsc --build (或 tsc -b) 来编译整个项目引用图
+    // 它会读取根 `tsconfig.json` 并智能地构建所有部分
+    exec("tsc --build", (error, _stdout, stderr) => {
+      // --- MODIFICATION END ---
       if (error) {
         console.error(`❌ tsc build failed: ${error.message}`);
         if (stderr) {
@@ -51,7 +57,8 @@ async function build() {
         return;
       }
       if (stderr) {
-        console.warn(`tsc stderr (may contain warnings): ${stderr}`);
+        // tsc --build 经常会在 stderr 中输出状态信息，不一定是错误
+        console.log(`tsc output: ${stderr}`);
       }
       console.log("✅ TypeScript declaration files generated.");
       console.timeEnd("d.ts generation");

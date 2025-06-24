@@ -15,3 +15,14 @@
 // @connect      akamaized.net
 // @grant unsafeWindow
 // ==/UserScript==
+
+/**
+ * @license
+ * BiliDownload - Copyright (c) 2025 OHNope
+ *
+ * This software is dual-licensed under the terms of the MIT License and the Apache License, Version 2.0.
+ * You may use this software according to the terms of either license.
+ *
+ * A copy of the MIT License is available in the LICENSE-MIT file.
+ * A copy of the Apache License 2.0 is available in the LICENSE-APACHE file.
+ */

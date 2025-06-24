@@ -1,7 +1,7 @@
 import { TaskSelectScript } from "./task-select/index";
 import { BiliSelectScript } from "./bili-select/index";
 import { gmFetch, addSingleVideo } from "./core/utils";
-import type { CustomWindow } from "./core/types";
+import type { CustomWindow } from "./core/types"; //!important
 
 // CSS Selectors
 const CONTAINER_SELECTOR = "div.video-pod__list.section";

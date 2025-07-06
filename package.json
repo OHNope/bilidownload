@@ -5,7 +5,6 @@
   "main": "main.js",
   "type": "module",
   "scripts": {
-    "build:types": "tsc --emitDeclarationOnly",
     "build": "node build.cjs"
   },
   "keywords": [],
